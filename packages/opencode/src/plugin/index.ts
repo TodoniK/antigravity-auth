@@ -105,7 +105,6 @@ import type { RequestRoutingEntry } from './shared/request-services'
 import { createSourceSidebarPublisher } from './shared/source-sidebar'
 import { createVaultAccountMenuSections } from './shared/vault-menu'
 import {
-  createVaultAccountPool,
   type VaultAccountPool,
   vaultAccountRowKey,
 } from './shared/vault-request-credentials'
@@ -117,7 +116,10 @@ import {
 } from './storage'
 import type { GetAuth, PluginContext, PluginInput, PluginResult } from './types'
 import { createV1VaultActivationMethod } from './vault-activation'
-import { createOpenCodeVaultCustody } from './vault-custody'
+import {
+  createOpenCodeVaultAccountPool,
+  createOpenCodeVaultCustody,
+} from './vault-custody'
 import { checkAndPublishVaultQuota } from './vault-quota-refresh'
 import { buildVaultSidebarProjection } from './vault-sidebar-projection'
 
@@ -269,7 +271,7 @@ export const createAntigravityPlugin =
       if (vaultPool && vaultPool.source === source) return vaultPool
       vaultPool = {
         source,
-        pool: createVaultAccountPool({
+        pool: createOpenCodeVaultAccountPool({
           source,
           durable: { source, readState: () => vaultCustody.readState() },
         }),

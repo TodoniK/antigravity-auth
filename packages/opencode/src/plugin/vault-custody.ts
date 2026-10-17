@@ -27,6 +27,7 @@ import {
   type CommonAuthClaustrumModule,
   type CommonAuthCommandsModule,
   createAntigravityVaultAccountSource,
+  type EmptyVaultRosterCause,
   type EnrollmentAuthority,
   emptyVaultRosterCause,
   enrollmentAuthority,
@@ -46,6 +47,12 @@ import {
   type VaultScopedClient,
 } from '@cortexkit/antigravity-auth-core'
 import { writeJsonAtomic } from '@cortexkit/antigravity-auth-core/atomic-write'
+
+import {
+  createVaultAccountPool,
+  type VaultAccountPool,
+  type VaultAccountPoolOptions,
+} from './shared/vault-request-credentials.ts'
 
 /** The host auth slot this plugin's provider lives in on OpenCode. */
 export const OPENCODE_VAULT_PROVIDER = 'google'
@@ -722,7 +729,12 @@ function pendingExistsGuidance(): string[] {
  * the grants are unknown, the general message names the grant command.
  */
 function noVaultAccountsGuidance(reach: VaultGrantReach | undefined): string[] {
-  switch (emptyVaultRosterCause(reach)) {
+  return emptyRosterGuidance(emptyVaultRosterCause(reach))
+}
+
+/** The Vault section's lines for each reason the vault serves no account. */
+function emptyRosterGuidance(cause: EmptyVaultRosterCause): string[] {
+  switch (cause) {
     case 'no-grant':
       return [
         `Vault access is approved. The vault has not granted ${OPENCODE_VAULT_ENROLLMENT_NAME} read access.`,
@@ -740,6 +752,31 @@ function noVaultAccountsGuidance(reach: VaultGrantReach | undefined): string[] {
         `The vault operator grants read access with: ${OPENCODE_VAULT_GRANT_COMMAND}`,
       ]
   }
+}
+
+/**
+ * The message for a request that finds no account because the vault serves
+ * this host none: the Vault section's lines for the same cause, one per line.
+ * An unknown cause returns undefined, so the request keeps the general vault
+ * remedy.
+ */
+export function openCodeEmptyVaultRosterRefusal(
+  cause: EmptyVaultRosterCause,
+): string | undefined {
+  return cause === 'unknown' ? undefined : emptyRosterGuidance(cause).join('\n')
+}
+
+/**
+ * The vault account pool both OpenCode hosts send requests through. A request
+ * that finds no account names the cause the Vault section names.
+ */
+export function createOpenCodeVaultAccountPool(
+  options: Omit<VaultAccountPoolOptions, 'emptyRosterRefusal'>,
+): VaultAccountPool {
+  return createVaultAccountPool({
+    ...options,
+    emptyRosterRefusal: openCodeEmptyVaultRosterRefusal,
+  })
 }
 
 /** The next steps for an enrollment state that needs the user or the operator to act. */

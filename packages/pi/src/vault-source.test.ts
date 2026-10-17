@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type {
-  VaultRoster,
-  VaultRouteRef,
-  VaultSendAdmission,
+import {
+  createAntigravityVaultAccountSource,
+  loadCommonAuthClaustrum,
+  type VaultRoster,
+  type VaultRouteRef,
+  type VaultSendAdmission,
 } from '@cortexkit/antigravity-auth-core'
 import type { PiVaultModeRead } from './vault-setup.ts'
 
@@ -89,6 +97,7 @@ function harness(): Harness {
       h.events.push(`accept:${ref.routeId}:${ref.accountIdentity}`)
     },
     grantReach: () => undefined,
+    emptyRosterCause: () => 'unknown',
   }
   h.options = {
     readMode: () => {
@@ -345,6 +354,119 @@ describe('Pi vault request path', () => {
       createPiVaultSend(h.options)(async () => ok(), abort.signal),
     ).rejects.toThrow()
     expect(h.sendRefs).toHaveLength(0)
+  })
+})
+
+describe('Pi vault send when the approved vault serves no accounts', () => {
+  const GRANT =
+    'ck auth grant --principal enrolled:antigravity-auth-pi --selector-kind category --selector antigravity-native --operation read'
+  const CATEGORY_GRANT = [
+    {
+      selectorKind: 'category',
+      selector: 'antigravity-native',
+      operation: 'read',
+    },
+  ]
+
+  /**
+   * Sends once through Pi's vault send over the real vault account source and
+   * consumer, against a vault whose listing names no account for Pi and
+   * reports `grants` and `grantTuples` as given (undefined: a vault too old
+   * to report them). Returns the refusal; nothing may be dispatched.
+   */
+  async function sendOnEmptyVault(
+    grants: number | undefined,
+    grantTuples: typeof CATEGORY_GRANT | undefined,
+  ) {
+    const root = realpathSync(
+      mkdtempSync(
+        join(
+          process.platform === 'win32' ? tmpdir() : '/tmp',
+          'pi-empty-vault-',
+        ),
+      ),
+    )
+    const tokenPath = join(root, 'enrollment-token.json')
+    writeFileSync(
+      tokenPath,
+      JSON.stringify({ token: 'ab'.repeat(32), token_generation: 1 }),
+      { mode: 0o600 },
+    )
+    const source = createAntigravityVaultAccountSource({
+      claustrum: await loadCommonAuthClaustrum(),
+      host: 'pi',
+      rosterPath: join(root, 'roster.json'),
+      tokenPath,
+      isCustodyActive: () => true,
+      reporterSource: 'direct',
+      logger: { warn() {}, debug() {} },
+      connect: async () => ({
+        listScoped: async () => ({
+          view: 'empty-view',
+          rows: [],
+          grants,
+          grantTuples,
+        }),
+        getScoped: async () => {
+          throw new Error('an empty roster admits no send')
+        },
+        reportAuthFailureScoped: async () => {},
+        close() {},
+      }),
+    })
+    try {
+      let dispatched = 0
+      const refusal = await createPiVaultSend({
+        readMode: () => ({
+          ok: true,
+          record: { version: 1, mode: 'custody' },
+        }),
+        source: async () => source,
+      })(async () => {
+        dispatched++
+        return ok()
+      }, new AbortController().signal).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(dispatched).toBe(0)
+      expect(refusal).toBeInstanceOf(PiVaultSendError)
+      return {
+        name: (refusal as Error).name,
+        message: (refusal as Error).message,
+      }
+    } finally {
+      source.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('says no grant exists and gives the grant command when the vault reports zero grants', async () => {
+    expect(await sendOnEmptyVault(0, [])).toEqual({
+      name: 'PiVaultSendError',
+      message: [
+        'The vault operator approved Pi. The vault has not granted Pi read access.',
+        `The vault operator grants it with: ${GRANT}`,
+      ].join('\n'),
+    })
+  })
+
+  it('says the grant reaches no login and gives the reclassify and status commands when a grant exists', async () => {
+    expect(await sendOnEmptyVault(1, CATEGORY_GRANT)).toEqual({
+      name: 'PiVaultSendError',
+      message: [
+        'The vault operator approved Pi. Pi has read access, but it reaches no Antigravity login in the vault.',
+        "The vault operator updates the vault's logins with: ck auth reclassify --from-registry",
+        'Then they check them with: ck auth status',
+      ].join('\n'),
+    })
+  })
+
+  it('keeps the general send error when the vault does not report grants', async () => {
+    expect(await sendOnEmptyVault(undefined, undefined)).toEqual({
+      name: 'PiVaultSendError',
+      message: 'The vault serves Pi no Antigravity accounts yet.',
+    })
   })
 })
 

@@ -296,6 +296,12 @@ export interface VaultRequestCredentials<A extends RequestAccountRow> {
     readonly account: A
     readonly signal: AbortSignal | undefined
   }): Promise<RequestSendAdmission>
+  /**
+   * The message for a request that finds no account, when the vault said
+   * why it serves this host none; read without I/O. Undefined, or no method,
+   * keeps the general vault remedy.
+   */
+  emptyRosterRefusal?(): string | undefined
 }
 
 /** One vault admission, valid for exactly one physical send. */
@@ -937,7 +943,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       const modelFromUrl = extractModelFromUrl(urlString) ?? 'unknown'
       return createNoAccountResponse(
         credentials.domain === 'vault'
-          ? VAULT_ACCOUNT_REMEDY
+          ? (credentials.emptyRosterRefusal?.() ?? VAULT_ACCOUNT_REMEDY)
           : 'No Antigravity accounts configured. Run `opencode auth login`.',
         modelFromUrl,
       )

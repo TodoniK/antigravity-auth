@@ -130,7 +130,6 @@ import {
 import { createVaultAccountMenuSections } from './shared/vault-menu'
 import {
   checkVaultQuota,
-  createVaultAccountPool,
   type VaultAccountPool,
   type VaultAccountRow,
   type VaultQuotaAnswer,
@@ -140,6 +139,7 @@ import {
 } from './shared/vault-request-credentials.ts'
 import { getStoragePath, initializeFreshAccountStoreFor } from './storage'
 import {
+  createOpenCodeVaultAccountPool,
   createOpenCodeVaultCustody,
   type OpenCodeVaultCustody,
 } from './vault-custody.ts'
@@ -1845,7 +1845,7 @@ async function createGaVaultLocationServices(input: {
       const location = start.runtime
       const routes = createGaRouteBook()
       const vaultLogger = location.logger.createLogger('vault-state')
-      const pool = createVaultAccountPool({
+      const pool = createOpenCodeVaultAccountPool({
         source,
         durable: {
           source,

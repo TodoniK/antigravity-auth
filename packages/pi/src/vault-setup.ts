@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs'
 import type { CommonAuthClaustrumModule } from '@cortexkit/antigravity-auth-core'
 import {
   ANTIGRAVITY_PROVIDER_ID,
+  type EmptyVaultRosterCause,
   emptyVaultRosterCause,
   enrollmentAuthority,
   sharedVaultTokenFolder,
@@ -434,7 +435,12 @@ function piPendingExistsGuidance(): string[] {
 export function piNoVaultAccountsGuidance(
   reach: VaultGrantReach | undefined,
 ): string[] {
-  switch (emptyVaultRosterCause(reach)) {
+  return piEmptyRosterGuidance(emptyVaultRosterCause(reach))
+}
+
+/** The Vault menu's lines for each reason the vault serves Pi no account. */
+function piEmptyRosterGuidance(cause: EmptyVaultRosterCause): string[] {
+  switch (cause) {
     case 'no-grant':
       return [
         'The vault operator approved Pi. The vault has not granted Pi read access.',
@@ -452,6 +458,19 @@ export function piNoVaultAccountsGuidance(
         `If the operator has not granted Pi read access yet, they run: ${PI_VAULT_GRANT_COMMAND}`,
       ]
   }
+}
+
+/**
+ * The send error when the vault serves Pi no account: the menu's lines for
+ * the same cause, one per line. An unknown cause returns undefined, so the
+ * send keeps its general error.
+ */
+export function piEmptyVaultRosterRefusal(
+  cause: EmptyVaultRosterCause,
+): string | undefined {
+  return cause === 'unknown'
+    ? undefined
+    : piEmptyRosterGuidance(cause).join('\n')
 }
 
 /** The next steps for an enrollment state that needs the user or the operator to act. */

@@ -1425,3 +1425,16 @@ runner = "command"
 command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/vault-custody.test.ts -t \"$1\"", "--", "{test}"]
 test_count_pattern = "Ran {count} test"
 expect_red = ['^Vault\ssection\senrollment\sguidance\snames\sthe\smissing\sread\sgrant\swhen\sthe\sapproved\svault\sserves\sno\saccounts$']
+
+[[control]]
+id = "vault-empty-roster-request-refusal-names-cause"
+guards = "A request that finds the approved vault serving no account names the cause the Vault section names instead of the general vault remedy."
+file = "packages/opencode/src/plugin/shared/request-services.ts"
+old = "          ? (credentials.emptyRosterRefusal?.() ?? VAULT_ACCOUNT_REMEDY)"
+new = "          ? VAULT_ACCOUNT_REMEDY // NON-VACUITY BREAK: ignore the empty-roster cause."
+test_file = "packages/opencode/src/plugin/fetch-interceptor.test.ts"
+list_command = ["bun", "scripts/list-bun-tests.mjs", "--cwd", ".", "packages/opencode/src/plugin/fetch-interceptor.test.ts", "-t", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/fetch-interceptor.test.ts -t \"$1\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^createFetchInterceptor\svault\scustody\ssource\sa\srequest\swhen\sthe\sapproved\svault\sserves\sno\saccounts\ssays\sno\sgrant\sexists\sand\sgives\sthe\sgrant\scommand\swhen\sthe\svault\sreports\szero\sgrants$', '^createFetchInterceptor\svault\scustody\ssource\sa\srequest\swhen\sthe\sapproved\svault\sserves\sno\saccounts\ssays\sthe\sgrant\sreaches\sno\slogin\sand\sgives\sthe\sreclassify\sand\sstatus\scommands\swhen\sa\sgrant\sexists$', '^createFetchInterceptor\svault\scustody\ssource\sa\srequest\swhen\sthe\sapproved\svault\sserves\sno\saccounts\skeeps\sthe\sgeneral\sAccounts\smenu\sline\seven\swhen\sthe\srequest\snames\sthe\scause$']

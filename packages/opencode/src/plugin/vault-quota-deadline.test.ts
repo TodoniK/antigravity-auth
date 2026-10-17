@@ -90,6 +90,7 @@ async function fixture(
     decline: async () => {},
     accept: async () => {},
     grantReach: () => undefined,
+    emptyRosterCause: () => 'unknown',
     refresh: async () => {},
     routes: () => [ref],
     attribution: () => ({ ...ref, recordVersion: 1 }),

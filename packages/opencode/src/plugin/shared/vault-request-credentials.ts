@@ -20,6 +20,7 @@ import {
   AccountSelector,
   type AntigravityQuotaCheckReport,
   type AntigravityVaultAccountSource,
+  type EmptyVaultRosterCause,
   type QuotaState,
   type QuotaSummary,
   type SelectableAccount,
@@ -38,11 +39,15 @@ import type {
   VaultRequestCredentials,
 } from './request-services.ts'
 
-/** The vault account source operations a vault request path uses. */
+/**
+ * The vault account source operations a vault request path uses. A source
+ * without `emptyRosterCause` never names why the vault serves no account.
+ */
 export type VaultRequestSource = Pick<
   AntigravityVaultAccountSource,
   'refresh' | 'routes' | 'admit' | 'reportServedStatus'
->
+> &
+  Partial<Pick<AntigravityVaultAccountSource, 'emptyRosterCause'>>
 
 /** The vault account source operations durable selection state uses. */
 export type VaultStateSource = Pick<
@@ -500,6 +505,14 @@ export interface VaultAccountPoolOptions {
     readonly onError?: (error: unknown) => void
   }
   readonly now?: () => number
+  /**
+   * The host's message for a request that finds no account, given why the
+   * source's roster is empty; undefined keeps the general vault remedy.
+   * Without it, requests always get the general remedy.
+   */
+  readonly emptyRosterRefusal?: (
+    cause: EmptyVaultRosterCause,
+  ) => string | undefined
 }
 
 /**
@@ -552,6 +565,10 @@ export function createVaultAccountPool(
         }
       : undefined,
   )
+  const refusal = options.emptyRosterRefusal
+  if (refusal)
+    credentials.emptyRosterRefusal = () =>
+      refusal(source.emptyRosterCause?.() ?? 'unknown')
 
   /** Fresh rows for the source's routes, with stored state on new ones. */
   const rowsFromSource = async (): Promise<VaultAccountRow[]> => {

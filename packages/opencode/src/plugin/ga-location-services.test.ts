@@ -801,6 +801,8 @@ async function transportLocation(
   domain: 'local' | 'vault',
   overrides: GaPluginOverrides,
   accountCount = 1,
+  /** The vault location's source in place of the stand-in. */
+  vaultSource?: import('./ga-location-services.ts').GaVaultCustodySource,
 ) {
   let services: GaLocationServices | undefined
   let runtime: LocationRuntime | undefined
@@ -935,7 +937,7 @@ async function transportLocation(
               ok: true,
               record: { version: 1, mode: 'custody' },
             }),
-            custodySource: async () => source,
+            custodySource: async () => vaultSource ?? source,
             readState: async () => ({ schemaVersion: 1, accounts: {} }),
             menuSection: () => ({
               id: 'vault',
@@ -1404,6 +1406,137 @@ describe('GA composed transport', () => {
       },
     )
   }
+})
+
+describe('GA vault request when the approved vault serves no accounts', () => {
+  const GRANT =
+    'ck auth grant --principal enrolled:antigravity-auth-opencode --selector-kind category --selector antigravity-native --operation read'
+  const CATEGORY_GRANT = [
+    {
+      selectorKind: 'category',
+      selector: 'antigravity-native',
+      operation: 'read',
+    },
+  ]
+
+  /**
+   * Runs one job through a GA vault location whose source is the real vault
+   * account source and consumer, over a vault whose listing names no account
+   * for this host and reports `grants` and `grantTuples` as given
+   * (undefined: a vault too old to report them).
+   */
+  async function requestOnEmptyVault(
+    scope: GaTestCase,
+    grants: number | undefined,
+    grantTuples: typeof CATEGORY_GRANT | undefined,
+  ) {
+    const vaultRoot = realpathSync(
+      mkdtempSync(
+        join(
+          process.platform === 'win32' ? tmpdir() : '/tmp',
+          'ga-empty-vault-',
+        ),
+      ),
+    )
+    scope.defer(async () => rmSync(vaultRoot, { recursive: true, force: true }))
+    const tokenPath = join(vaultRoot, 'enrollment-token.json')
+    await scope.step(() =>
+      writeFile(
+        tokenPath,
+        JSON.stringify({ token: 'ab'.repeat(32), token_generation: 1 }),
+        { mode: 0o600 },
+      ),
+    )
+    const source = realCore.createAntigravityVaultAccountSource({
+      claustrum: await scope.step(() => realCore.loadCommonAuthClaustrum()),
+      host: 'opencode',
+      rosterPath: join(vaultRoot, 'roster.json'),
+      tokenPath,
+      isCustodyActive: () => true,
+      reporterSource: 'direct',
+      logger: { warn() {}, debug() {} },
+      connect: async () => ({
+        listScoped: async () => ({
+          view: 'empty-view',
+          rows: [],
+          grants,
+          grantTuples,
+        }),
+        getScoped: async () => {
+          throw new Error('an empty roster admits no send')
+        },
+        reportAuthFailureScoped: async () => {},
+        close() {},
+      }),
+    })
+    scope.defer(async () => source.close())
+    const location = await transportLocation(scope, 'vault', {}, 1, source)
+    try {
+      const response = await location.serving.execute(transportJob, {
+        signal: scope.controller().signal,
+        send: async () => {
+          throw new Error('unused')
+        },
+      })
+      expect(networkCalls).toHaveLength(0)
+      return {
+        status: response.status,
+        headers: Object.fromEntries(response.headers),
+        body: await response.json(),
+      }
+    } finally {
+      await location.dispose()
+    }
+  }
+
+  /** The no-account 401 every case keeps; only the message differs. */
+  const noAccountRefusal = (message: string) => ({
+    status: 401,
+    headers: {
+      'content-type': 'application/json',
+      'x-antigravity-error-type': 'no_accounts',
+      'x-antigravity-requested-model': 'antigravity-gemini-3.5-flash',
+    },
+    body: { error: { code: 401, message, status: 'UNAUTHENTICATED' } },
+  })
+
+  ownedIt(
+    'says no grant exists and gives the grant command when the vault reports zero grants',
+    async (scope) => {
+      expect(await requestOnEmptyVault(scope, 0, [])).toEqual(
+        noAccountRefusal(
+          [
+            'Vault access is approved. The vault has not granted antigravity-auth-opencode read access.',
+            `The vault operator grants it with: ${GRANT}`,
+          ].join('\n'),
+        ),
+      )
+    },
+  )
+
+  ownedIt(
+    'says the grant reaches no login and gives the reclassify and status commands when a grant exists',
+    async (scope) => {
+      expect(await requestOnEmptyVault(scope, 1, CATEGORY_GRANT)).toEqual(
+        noAccountRefusal(
+          [
+            'Vault access is approved. antigravity-auth-opencode has read access, but it reaches no Antigravity login in the vault.',
+            "The vault operator updates the vault's logins with: ck auth reclassify --from-registry",
+            'Then they check them with: ck auth status',
+          ].join('\n'),
+        ),
+      )
+    },
+  )
+
+  ownedIt(
+    'keeps the general vault remedy when the vault does not report grants',
+    async (scope) => {
+      expect(await requestOnEmptyVault(scope, undefined, undefined)).toEqual(
+        noAccountRefusal(realCore.VAULT_ACCOUNT_REMEDY),
+      )
+    },
+  )
 })
 
 describe('GA composed request context', () => {

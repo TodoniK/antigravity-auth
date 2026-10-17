@@ -16,6 +16,7 @@ import {
   type CommonAuthCommandsModule,
   type CommonAuthPiSlotModule,
   createAntigravityVaultAccountSource,
+  type EmptyVaultRosterCause,
   enrollmentAuthority,
   loadCommonAuthClaustrum,
   type VaultGrantReach,
@@ -40,13 +41,20 @@ import {
   type PiVaultModeRead,
   type PiVaultModeRecord,
   PiVaultSetup,
+  piEmptyVaultRosterRefusal,
   readPiVaultMode,
 } from './vault-setup.ts'
 
 /** The shared vault account source operations Pi's request path and setup use. */
 export type PiVaultAccountSource = Pick<
   AntigravityVaultAccountSource,
-  'refresh' | 'routes' | 'send' | 'decline' | 'accept' | 'grantReach'
+  | 'refresh'
+  | 'routes'
+  | 'send'
+  | 'decline'
+  | 'accept'
+  | 'grantReach'
+  | 'emptyRosterCause'
 >
 
 type PiVaultRouteRef = VaultRouteRef
@@ -81,6 +89,7 @@ function requireCustody(read: PiVaultModeRead): PiVaultModeRecord {
 function selectRoute(
   routes: readonly PiVaultRouteRef[],
   routeId: string | undefined,
+  emptyRosterCause: () => EmptyVaultRosterCause,
 ): PiVaultRouteRef {
   if (routeId !== undefined) {
     const selected = routes.find((route) => route.routeId === routeId)
@@ -93,7 +102,8 @@ function selectRoute(
   const [only, ...rest] = routes
   if (!only)
     throw new PiVaultSendError(
-      'The vault serves Pi no Antigravity accounts yet.',
+      piEmptyVaultRosterRefusal(emptyRosterCause()) ??
+        'The vault serves Pi no Antigravity accounts yet.',
     )
   if (rest.length > 0)
     throw new PiVaultSendError(
@@ -127,7 +137,9 @@ export function createPiVaultSend(
     }
     // Capture the route before any further await, so the send is bound to
     // the account the roster named now, not to whatever later sits there.
-    const ref = selectRoute(routes, record.routeId)
+    const ref = selectRoute(routes, record.routeId, () =>
+      source.emptyRosterCause(),
+    )
     return source.send(ref, dispatch, { site: 'model', signal })
   }
 }

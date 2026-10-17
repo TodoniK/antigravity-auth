@@ -33,6 +33,10 @@ import {
   type AntigravityVaultHost,
 } from './vault-family.ts'
 import {
+  type EmptyVaultRosterCause,
+  emptyVaultRosterCause,
+} from './vault-grant-reach.ts'
+import {
   type AntigravityVaultStateFs,
   type AntigravityVaultStateUpdate,
   commitVaultProviderState,
@@ -281,6 +285,13 @@ export interface AntigravityVaultAccountSource {
    * vault is too old to report grants, or the source is closed.
    */
   grantReach(): VaultGrantReach | undefined
+  /**
+   * Why the last committed roster lists no accounts at all, read without any
+   * I/O. `unknown` unless that roster holds no rows and the vault reported this
+   * host's grants with it. A roster whose rows are all declined, disabled or
+   * stale is not empty, so it is `unknown` too.
+   */
+  emptyRosterCause(): EmptyVaultRosterCause
   /** Close the vault connection; later calls are refused. */
   close(): void
 }
@@ -654,6 +665,10 @@ export function createAntigravityVaultAccountSource(
       await consumer.accept(ref.routeId)
     },
     grantReach: () => (closed ? undefined : consumer.grantReach()),
+    emptyRosterCause: () =>
+      closed || consumer.snapshot()?.rows.length !== 0
+        ? 'unknown'
+        : emptyVaultRosterCause(consumer.grantReach()),
     close: () => {
       if (closed) return
       closed = true

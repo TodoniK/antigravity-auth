@@ -7,6 +7,8 @@ import {
   mock,
   spyOn,
 } from 'bun:test'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
   AccountRepository,
@@ -14,7 +16,12 @@ import type {
   AccountRow,
   RowRef,
 } from '@cortexkit/antigravity-auth-core'
-import { ANTIGRAVITY_ENDPOINT_DAILY } from '@cortexkit/antigravity-auth-core'
+import {
+  ANTIGRAVITY_ENDPOINT_DAILY,
+  createAntigravityVaultAccountSource,
+  loadCommonAuthClaustrum,
+  VAULT_ACCOUNT_REMEDY,
+} from '@cortexkit/antigravity-auth-core'
 import { AccountManager, loadAccountManagerFromRepository } from './accounts'
 import { DEFAULT_CONFIG } from './config'
 import type { AgyTransport } from './dependencies'
@@ -23,6 +30,7 @@ import {
   createVaultFetchInterceptor,
 } from './fetch-interceptor'
 import { AgySessionRegistry } from './session-context'
+import { createVaultAccountMenuSections } from './shared/vault-menu'
 import type { VaultRequestSource } from './shared/vault-request-credentials'
 import {
   createVaultAccountPool,
@@ -30,6 +38,7 @@ import {
 } from './shared/vault-request-credentials'
 import { type AccountStorageV4, saveAccountsReplace } from './storage'
 import type { GetAuth, PluginClient } from './types'
+import { createOpenCodeVaultAccountPool } from './vault-custody'
 
 const transportMock = mock(
   async (...args: Parameters<typeof fetch>): Promise<Response> =>
@@ -1641,6 +1650,157 @@ describe('createFetchInterceptor', () => {
       } finally {
         interceptor.dispose()
       }
+    })
+
+    describe('a request when the approved vault serves no accounts', () => {
+      const GRANT =
+        'ck auth grant --principal enrolled:antigravity-auth-opencode --selector-kind category --selector antigravity-native --operation read'
+      const CATEGORY_GRANT = [
+        {
+          selectorKind: 'category',
+          selector: 'antigravity-native',
+          operation: 'read',
+        },
+      ]
+
+      /**
+       * The real vault account source and consumer over a vault whose listing
+       * names no account for this host and reports `grants` and
+       * `grantTuples` as given (undefined: a vault too old to report them).
+       */
+      async function emptyVaultSource(
+        grants: number | undefined,
+        grantTuples: typeof CATEGORY_GRANT | undefined,
+      ) {
+        const root = realpathSync(
+          mkdtempSync(
+            join(
+              process.platform === 'win32' ? tmpdir() : '/tmp',
+              'opencode-empty-vault-',
+            ),
+          ),
+        )
+        const tokenPath = join(root, 'enrollment-token.json')
+        writeFileSync(
+          tokenPath,
+          JSON.stringify({ token: 'ab'.repeat(32), token_generation: 1 }),
+          { mode: 0o600 },
+        )
+        const source = createAntigravityVaultAccountSource({
+          claustrum: await loadCommonAuthClaustrum(),
+          host: 'opencode',
+          rosterPath: join(root, 'roster.json'),
+          tokenPath,
+          isCustodyActive: () => true,
+          reporterSource: 'direct',
+          logger: { warn() {}, debug() {} },
+          connect: async () => ({
+            listScoped: async () => ({
+              view: 'empty-view',
+              rows: [],
+              grants,
+              grantTuples,
+            }),
+            getScoped: async () => {
+              throw new Error('an empty roster admits no send')
+            },
+            reportAuthFailureScoped: async () => {},
+            close() {},
+          }),
+        })
+        return {
+          source,
+          dispose() {
+            source.close()
+            rmSync(root, { recursive: true, force: true })
+          },
+        }
+      }
+
+      /**
+       * Sends one request through the OpenCode 1 vault interceptor over the
+       * pool both OpenCode hosts build, then reads the same pool's Accounts
+       * menu line.
+       */
+      async function requestOnEmptyVault(
+        grants: number | undefined,
+        grantTuples: typeof CATEGORY_GRANT | undefined,
+      ) {
+        const vault = await emptyVaultSource(grants, grantTuples)
+        const pool = createOpenCodeVaultAccountPool({ source: vault.source })
+        const interceptor = await vaultInterceptor(vault.source, pool)
+        try {
+          const response = await interceptor.fetch(
+            NON_STREAM_URL,
+            GENERATIVE_INIT,
+          )
+          const accounts = await createVaultAccountMenuSections(
+            pool,
+            () => 'unused',
+          ).accounts.build({ notify: () => undefined })
+          return {
+            refusal: {
+              status: response.status,
+              headers: Object.fromEntries(response.headers),
+              body: await response.json(),
+            },
+            accountsLines: accounts.lines,
+          }
+        } finally {
+          await interceptor.dispose()
+          vault.dispose()
+        }
+      }
+
+      /** The no-account 401 every case keeps; only the message differs. */
+      const noAccountRefusal = (message: string) => ({
+        status: 401,
+        headers: {
+          'content-type': 'application/json',
+          'x-antigravity-error-type': 'no_accounts',
+          'x-antigravity-requested-model': 'gemini-3-flash',
+        },
+        body: { error: { code: 401, message, status: 'UNAUTHENTICATED' } },
+      })
+
+      it('says no grant exists and gives the grant command when the vault reports zero grants', async () => {
+        const { refusal } = await requestOnEmptyVault(0, [])
+        expect(refusal).toEqual(
+          noAccountRefusal(
+            [
+              'Vault access is approved. The vault has not granted antigravity-auth-opencode read access.',
+              `The vault operator grants it with: ${GRANT}`,
+            ].join('\n'),
+          ),
+        )
+        expect(transportMock).not.toHaveBeenCalled()
+      })
+
+      it('says the grant reaches no login and gives the reclassify and status commands when a grant exists', async () => {
+        const { refusal } = await requestOnEmptyVault(1, CATEGORY_GRANT)
+        expect(refusal).toEqual(
+          noAccountRefusal(
+            [
+              'Vault access is approved. antigravity-auth-opencode has read access, but it reaches no Antigravity login in the vault.',
+              "The vault operator updates the vault's logins with: ck auth reclassify --from-registry",
+              'Then they check them with: ck auth status',
+            ].join('\n'),
+          ),
+        )
+        expect(transportMock).not.toHaveBeenCalled()
+      })
+
+      it('keeps the general vault remedy when the vault does not report grants', async () => {
+        const { refusal } = await requestOnEmptyVault(undefined, undefined)
+        expect(refusal).toEqual(noAccountRefusal(VAULT_ACCOUNT_REMEDY))
+        expect(transportMock).not.toHaveBeenCalled()
+      })
+
+      it('keeps the general Accounts menu line even when the request names the cause', async () => {
+        const { refusal, accountsLines } = await requestOnEmptyVault(0, [])
+        expect(refusal.body.error.message).not.toBe(VAULT_ACCOUNT_REMEDY)
+        expect(accountsLines).toEqual([VAULT_ACCOUNT_REMEDY])
+      })
     })
   })
 

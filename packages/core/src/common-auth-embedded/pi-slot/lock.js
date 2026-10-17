@@ -1,4 +1,4 @@
-import { rmdirSync, statSync } from 'node:fs';
+import { rmdirSync, statSync, utimesSync } from 'node:fs';
 import { mkdir, rmdir, stat, utimes } from 'node:fs/promises';
 // Protocol source: proper-lockfile 4.1.2 lib/lockfile.js and lib/mtime-precision.js;
 // line-level citations and the Pi lock options are recorded in docs/sources.md.
@@ -135,7 +135,9 @@ export async function acquirePiLock(authPath, onCompromised, onRenew) {
             return;
         let observed;
         try {
-            observed = await stat(path);
+            // Durable writes can occupy every async filesystem worker in fsync.
+            // Renew on the calling thread so their queue cannot consume the lease.
+            observed = statSync(path);
         }
         catch (error) {
             retry(error);
@@ -151,12 +153,14 @@ export async function acquirePiLock(authPath, onCompromised, onRenew) {
         }
         const next = new Date(precision === 's' ? Math.ceil(Date.now() / 1_000) * 1_000 : Date.now());
         try {
-            await utimes(path, next, next);
+            utimesSync(path, next, next);
         }
         catch (error) {
             retry(error);
             return;
         }
+        // A metadata syscall can itself stall; never confirm an expired lease.
+        assertFresh();
         if (released)
             return;
         mtime = next.getTime();

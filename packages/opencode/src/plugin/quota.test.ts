@@ -819,16 +819,16 @@ describe('authorized local quota fetcher', () => {
 // Use the pinned candidate's store and filesystem code copied into the core package.
 // Its common-auth-embedded/source-output.json records each file's size and
 // SHA-256 from the pinned published archive at
-// `tools/common-auth-build/inputs/cortexkit-common-auth-0.17.2.tgz`. Verify each file against that
+// `tools/common-auth-build/inputs/cortexkit-common-auth-0.18.0.tgz`. Verify each file against that
 // record before loading it with loadCommonAuthStoreModules; any difference
 // fails the test. Account files live in a separate disposable directory.
 // ---------------------------------------------------------------------------
 
 const RELEASED_COMMON_AUTH = {
   package: '@cortexkit/common-auth',
-  version: '0.17.2',
+  version: '0.18.0',
   tarballSha256:
-    'c135db860069ed22694e98e54883992efd2bc3f7fe5cb489e6b22985dd631cca',
+    '932d944f1da27061e3d113ac9f8fa8ef41fc225a1c3dc825eedeaa9eced9cd02',
 } as const
 
 async function embeddedFilesBelow(

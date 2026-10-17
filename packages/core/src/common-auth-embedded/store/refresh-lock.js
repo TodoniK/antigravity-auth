@@ -42,7 +42,6 @@ export async function acquirePoolLock(spec, defaults, env) {
             name: spec.name,
             path: spec.path,
             ttlMs: options.ttlMs,
-            now: env.now,
             renew: options.renew,
             onContended: () => emit('contended'),
             ...(env.onRenewalTimer

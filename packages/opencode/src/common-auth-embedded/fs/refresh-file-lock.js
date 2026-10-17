@@ -31,7 +31,12 @@ export function isLostMarkerRaceError(error) {
     return (code === 'ENOENT' ||
         (!windowsPrivateFiles && (code === 'EINVAL' || code === 'ENOTDIR')));
 }
-export async function acquireRefreshFileLock(options) {
+/** Filesystem leases share wall time across all callers and processes. */
+export function acquireRefreshFileLock(options) {
+    return acquireRefreshFileLockWithClock({ ...options, now: Date.now });
+}
+/** @internal Clock seam for lease tests; not exported by the package's fs entry point. */
+export async function acquireRefreshFileLockWithClock(options) {
     const lockPath = lockPathFor(options.path, options.name);
     const legacyOwnerPath = join(lockPath, 'owner.json');
     const ownerId = randomUUID();

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "package": "@cortexkit/common-auth",
-  "version": "0.17.2",
+  "version": "0.18.0",
   "artifactStatus": "published",
   "publicRoots": {
     "./rpc": {
@@ -61,15 +61,15 @@
       "import": "./dist/opencode2/index.js"
     }
   },
-  "input": "tools/common-auth-build/inputs/cortexkit-common-auth-0.17.2.tgz",
-  "tarballSha256": "c135db860069ed22694e98e54883992efd2bc3f7fe5cb489e6b22985dd631cca",
-  "sri": "sha512-hPt8Zoxw5Sc+rE3Iq57QNAlXkTswviwtjOBsc5TrAZHyOBZ3SGixkvFN2oZH59MxB8b6X+eAfcvvQDDpV+JOHA==",
-  "canonicalFiles": 176,
-  "canonicalBytes": 938243,
+  "input": "tools/common-auth-build/inputs/cortexkit-common-auth-0.18.0.tgz",
+  "tarballSha256": "932d944f1da27061e3d113ac9f8fa8ef41fc225a1c3dc825eedeaa9eced9cd02",
+  "sri": "sha512-2vHXO1WaAtXQDwUpGaJY+Ow7f/YLUK4ut4kYVXz0rwiekEBV1v8AmvVBx0TqzU/7W2CgL6YgzCNWu2wwA22u0A==",
+  "canonicalFiles": 178,
+  "canonicalBytes": 945354,
   "generator": {
     "path": "packages/opencode/scripts/embed-common-auth.ts",
     "version": 3,
-    "sha256": "9a280484c51050f8f2c8a0d1c6687c9e28a8147c2575fa5f57024d9975802676"
+    "sha256": "3924346a25a0ea1fbdc854c8295d6db062631808d23fed913e5a9ed5131fc798"
   },
   "files": [
     {
@@ -539,17 +539,17 @@
     {
       "source": "package/dist/fs/refresh-file-lock.d.ts",
       "output": "fs/refresh-file-lock.d.ts",
-      "bytes": 1765,
-      "sourceSha256": "72996a1247d498a34ac157d23c34ef03bcbdb68c79e8751be4874885aed7e843",
-      "outputSha256": "72996a1247d498a34ac157d23c34ef03bcbdb68c79e8751be4874885aed7e843",
+      "bytes": 2125,
+      "sourceSha256": "ec643f4e081c108c1b42ceb17a83cf3e7e9997a4c75e1a61ffc33b5b44ccd414",
+      "outputSha256": "ec643f4e081c108c1b42ceb17a83cf3e7e9997a4c75e1a61ffc33b5b44ccd414",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/fs/refresh-file-lock.js",
       "output": "fs/refresh-file-lock.js",
-      "bytes": 29402,
-      "sourceSha256": "d162b8972a23ffec999a9c90ef6b63e28314c235a668bad378b7c8561efd3666",
-      "outputSha256": "d162b8972a23ffec999a9c90ef6b63e28314c235a668bad378b7c8561efd3666",
+      "bytes": 29704,
+      "sourceSha256": "5c52aad573e84e8065dcf06259ecf38345e8b5a2c401029a23d942f28c7a8521",
+      "outputSha256": "5c52aad573e84e8065dcf06259ecf38345e8b5a2c401029a23d942f28c7a8521",
       "transform": "verbatim"
     },
     {
@@ -739,9 +739,9 @@
     {
       "source": "package/dist/pi-slot/lock.js",
       "output": "pi-slot/lock.js",
-      "bytes": 7109,
-      "sourceSha256": "92ad2fbf7792624b8dae99d7239e1e6f0f7d7f6da10be8b1594500700c7c3077",
-      "outputSha256": "92ad2fbf7792624b8dae99d7239e1e6f0f7d7f6da10be8b1594500700c7c3077",
+      "bytes": 7385,
+      "sourceSha256": "68b0c7c764b88391e466f3b9fa172df176bf21529399606bf84475f3b920db8b",
+      "outputSha256": "68b0c7c764b88391e466f3b9fa172df176bf21529399606bf84475f3b920db8b",
       "transform": "verbatim"
     },
     {
@@ -1049,11 +1049,27 @@
       "transform": "verbatim"
     },
     {
+      "source": "package/dist/setup/command-error.d.ts",
+      "output": "setup/command-error.d.ts",
+      "bytes": 591,
+      "sourceSha256": "1b9d258f02a619a674aa45937c9a7b1ed011cfa204a26ea7b8e32520bb95d198",
+      "outputSha256": "1b9d258f02a619a674aa45937c9a7b1ed011cfa204a26ea7b8e32520bb95d198",
+      "transform": "verbatim"
+    },
+    {
+      "source": "package/dist/setup/command-error.js",
+      "output": "setup/command-error.js",
+      "bytes": 1554,
+      "sourceSha256": "347a4fef4e9accee88f8f5162f47c82fb11e6486d76b0c38291b0f282cdc106d",
+      "outputSha256": "347a4fef4e9accee88f8f5162f47c82fb11e6486d76b0c38291b0f282cdc106d",
+      "transform": "verbatim"
+    },
+    {
       "source": "package/dist/setup/command-runner.js",
       "output": "setup/command-runner.js",
-      "bytes": 2161,
-      "sourceSha256": "a462c083c5119d49fc2f940ec08d5f44a298653967f29bffac05e4355e6d53d3",
-      "outputSha256": "a462c083c5119d49fc2f940ec08d5f44a298653967f29bffac05e4355e6d53d3",
+      "bytes": 5843,
+      "sourceSha256": "d7f745555acbdd67a63049efcdb59e3daed7c7f68302baa65403315a14e2da6b",
+      "outputSha256": "d7f745555acbdd67a63049efcdb59e3daed7c7f68302baa65403315a14e2da6b",
       "transform": "verbatim"
     },
     {
@@ -1107,17 +1123,17 @@
     {
       "source": "package/dist/setup/index.d.ts",
       "output": "setup/index.d.ts",
-      "bytes": 724,
-      "sourceSha256": "ed6287c7d7c971d6f846aa2ffda9e0da20b6c6a312cbf0f2f038f3c1a7a4e74c",
-      "outputSha256": "ed6287c7d7c971d6f846aa2ffda9e0da20b6c6a312cbf0f2f038f3c1a7a4e74c",
+      "bytes": 780,
+      "sourceSha256": "dcd8c9af4d525cf9a24c5c4e69d7f4f5e0f2d8d690644e7a950c7699d8890bee",
+      "outputSha256": "dcd8c9af4d525cf9a24c5c4e69d7f4f5e0f2d8d690644e7a950c7699d8890bee",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/setup/index.js",
       "output": "setup/index.js",
-      "bytes": 444,
-      "sourceSha256": "a8ae2a1e0612424a184cf81421453666516bab8ba43de009253a8cc15d2d6374",
-      "outputSha256": "a8ae2a1e0612424a184cf81421453666516bab8ba43de009253a8cc15d2d6374",
+      "bytes": 500,
+      "sourceSha256": "efc3525a0cdb6c2d1351ebb8b99606097b1ffd9f040132f8b04bb75420557159",
+      "outputSha256": "efc3525a0cdb6c2d1351ebb8b99606097b1ffd9f040132f8b04bb75420557159",
       "transform": "verbatim"
     },
     {
@@ -1163,17 +1179,17 @@
     {
       "source": "package/dist/setup/register.js",
       "output": "setup/register.js",
-      "bytes": 5941,
-      "sourceSha256": "5c1f63ba2cf6ca315531398346470db78e9e999b27041816e919762d14cb225b",
-      "outputSha256": "5c1f63ba2cf6ca315531398346470db78e9e999b27041816e919762d14cb225b",
+      "bytes": 6178,
+      "sourceSha256": "65171657a6b2b5788bc3dea16729a045b70c73b0f6d37ada0f1864c889450dfe",
+      "outputSha256": "65171657a6b2b5788bc3dea16729a045b70c73b0f6d37ada0f1864c889450dfe",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/setup/types.d.ts",
       "output": "setup/types.d.ts",
-      "bytes": 4928,
-      "sourceSha256": "2d357d6345a94e7b75ef7af4e0c64f1145a87a67e7124ec0c22f5169c533f640",
-      "outputSha256": "2d357d6345a94e7b75ef7af4e0c64f1145a87a67e7124ec0c22f5169c533f640",
+      "bytes": 4985,
+      "sourceSha256": "158770313cf823d300d0dec48a311d7c0a3ed8b2102f42d560cc8af1a90e7da2",
+      "outputSha256": "158770313cf823d300d0dec48a311d7c0a3ed8b2102f42d560cc8af1a90e7da2",
       "transform": "verbatim"
     },
     {
@@ -1275,17 +1291,17 @@
     {
       "source": "package/dist/store/pool.d.ts",
       "output": "store/pool.d.ts",
-      "bytes": 10754,
-      "sourceSha256": "901b2881e94f067c6b454002f1e3922b75f248f2a25ef7548c399cafd9611159",
-      "outputSha256": "901b2881e94f067c6b454002f1e3922b75f248f2a25ef7548c399cafd9611159",
+      "bytes": 10785,
+      "sourceSha256": "192ea359d2ce746b31693cf06795a281f2e06804c567975f127ea05fa6fb4aef",
+      "outputSha256": "192ea359d2ce746b31693cf06795a281f2e06804c567975f127ea05fa6fb4aef",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/store/pool.js",
       "output": "store/pool.js",
-      "bytes": 5713,
-      "sourceSha256": "678cca0578ac32eb1d9e45408614c6a7b56a6dcb94672a961c8c13bca55171fd",
-      "outputSha256": "678cca0578ac32eb1d9e45408614c6a7b56a6dcb94672a961c8c13bca55171fd",
+      "bytes": 5671,
+      "sourceSha256": "8dc0d27b37204c2c3229296e8efbbfac6bcb30538b39d8d95771267487a06292",
+      "outputSha256": "8dc0d27b37204c2c3229296e8efbbfac6bcb30538b39d8d95771267487a06292",
       "transform": "verbatim"
     },
     {
@@ -1339,17 +1355,17 @@
     {
       "source": "package/dist/store/refresh-lock.d.ts",
       "output": "store/refresh-lock.d.ts",
-      "bytes": 2442,
-      "sourceSha256": "5b4230fad8b94abc23d9b4a9c72cf21d7c961ac6359561a4da28e1e807bcb0ca",
-      "outputSha256": "5b4230fad8b94abc23d9b4a9c72cf21d7c961ac6359561a4da28e1e807bcb0ca",
+      "bytes": 2419,
+      "sourceSha256": "50401b2e9b69b73592e0a4391fc1992a380539360b7cabfe5fce6d35fb29c648",
+      "outputSha256": "50401b2e9b69b73592e0a4391fc1992a380539360b7cabfe5fce6d35fb29c648",
       "transform": "verbatim"
     },
     {
       "source": "package/dist/store/refresh-lock.js",
       "output": "store/refresh-lock.js",
-      "bytes": 4681,
-      "sourceSha256": "035a03e02a0690ec51d92df0b61e2ae6abb7b8d6a141112640f8d649eb583949",
-      "outputSha256": "035a03e02a0690ec51d92df0b61e2ae6abb7b8d6a141112640f8d649eb583949",
+      "bytes": 4655,
+      "sourceSha256": "f2a316af681d1a14254873b9dc2d608a76919b7ba930636ee9f266c99195fb67",
+      "outputSha256": "f2a316af681d1a14254873b9dc2d608a76919b7ba930636ee9f266c99195fb67",
       "transform": "verbatim"
     },
     {

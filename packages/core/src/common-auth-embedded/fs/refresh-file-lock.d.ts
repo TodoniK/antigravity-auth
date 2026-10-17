@@ -13,7 +13,7 @@ export interface RefreshFileLock {
     whenLost(): Promise<LockLoss>;
     hasLost(): boolean;
 }
-export declare function acquireRefreshFileLock(options: {
+type RefreshFileLockOptions = {
     name: string;
     ttlMs: number;
     /**
@@ -22,7 +22,6 @@ export declare function acquireRefreshFileLock(options: {
      * be one host's path.
      */
     path: string;
-    now?: () => number;
     renew?: boolean;
     renewIntervalMs?: number;
     /** Notifies a live-owner refusal without awaiting; observer failures are ignored. */
@@ -30,4 +29,11 @@ export declare function acquireRefreshFileLock(options: {
     /** Synchronous, never awaited; throws and returned promise/thenable rejections are isolated. */
     onRenewalTimer?: (event: 'scheduled' | 'cancelled') => void;
     onStep?: (step: 'stale-marker-stat' | 'stale-marker-claimed' | 'stale-lock-observed' | 'lock-read-ready' | 'lock-missing' | 'stale-lock-confirmed' | 'stale-lock-removed' | 'stale-lock-recreated' | 'eviction-marker-acquired' | 'renewal-owner-confirmed' | 'renewal-marker-unavailable' | 'renewal-write-fenced' | 'renewal-write-ready' | 'renewal-write-finished' | 'relinquish-read' | 'renewal-finished' | 'release-owner-confirmed') => void | Promise<void>;
+};
+/** Filesystem leases share wall time across all callers and processes. */
+export declare function acquireRefreshFileLock(options: RefreshFileLockOptions): Promise<RefreshFileLock | null>;
+/** @internal Clock seam for lease tests; not exported by the package's fs entry point. */
+export declare function acquireRefreshFileLockWithClock(options: RefreshFileLockOptions & {
+    now?: () => number;
 }): Promise<RefreshFileLock | null>;
+export {};

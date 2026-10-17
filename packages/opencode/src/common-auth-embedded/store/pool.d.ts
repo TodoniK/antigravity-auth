@@ -42,7 +42,7 @@ export interface OpenPoolStoreOptions {
     requireCredentialStamps?: boolean;
     /** Require an exact secret fingerprint for every roster-publication removal. */
     requireRemovedFingerprint?: boolean;
-    /** Injected clock for leases, refresh stamps and `addedAt`. */
+    /** Logical clock for refresh stamps and `addedAt`; filesystem leases always use wall time. */
     now?: () => number;
     /**
      * Ordered store-lock list held across every read-modify-write. Defaults to

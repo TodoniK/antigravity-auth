@@ -372,6 +372,7 @@
       "node:path"
     ],
     "rpc/server-registry.d.ts": ["./rpc-server.js"],
+    "setup/command-error.js": ["../logger/redact.js", "./command-runner.js"],
     "setup/command-runner.js": ["node:child_process"],
     "setup/command.d.ts": ["./types.js"],
     "setup/command.js": [
@@ -411,6 +412,7 @@
       "node:timers/promises"
     ],
     "setup/index.d.ts": [
+      "./command-error.js",
       "./command.js",
       "./detect.js",
       "./process-fence.js",
@@ -418,6 +420,7 @@
       "./types.js"
     ],
     "setup/index.js": [
+      "./command-error.js",
       "./command.js",
       "./detect.js",
       "./process-fence.js",
@@ -429,6 +432,7 @@
     "setup/prompts.js": ["../auth-menu/select.js"],
     "setup/register.d.ts": ["./types.js"],
     "setup/register.js": [
+      "./command-error.js",
       "./command-runner.js",
       "./config-write.js",
       "./detect.js",

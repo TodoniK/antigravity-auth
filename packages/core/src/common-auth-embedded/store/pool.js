@@ -57,7 +57,6 @@ export function openPoolStore(options) {
         ],
         lockDefaults,
         lockEnv: {
-            now: options.now ?? Date.now,
             ...(options.onLockEvent ? { onLockEvent: options.onLockEvent } : {}),
             ...(options.onLockStep ? { onLockStep: options.onLockStep } : {}),
             ...(options.onRenewalTimer

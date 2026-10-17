@@ -57,6 +57,8 @@ export interface CommandResult {
     exitCode: number;
     stdout: string;
     stderr: string;
+    spawnError?: boolean;
+    stderrTruncated?: boolean;
     signal?: NodeJS.Signals | null;
     timedOut?: boolean;
     durationMs?: number;

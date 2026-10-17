@@ -24,7 +24,6 @@ export type LockEvent = {
     path: string;
 };
 export interface LockEnvironment {
-    now: () => number;
     onLockEvent?: (event: LockEvent) => void;
     onLockStep?: (lock: {
         name: string;

@@ -1,5 +1,7 @@
 import { describe, expect, it, spyOn } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import opusLow from '../../../../test-fixtures/agy-cli-1.3.3/native-opus-low.json'
 import sonnetLow from '../../../../test-fixtures/agy-cli-1.3.3/native-sonnet-low.json'
 import schemaDerived from '../../../../test-fixtures/agy-cli-1.3.3/schema-derived-thinking.json'
@@ -12,7 +14,11 @@ import type {
   StreamingOptions,
   ThoughtBuffer,
 } from './core/streaming/types'
-import { initializeDebug } from './debug'
+import {
+  closeDebugLog,
+  initializeDebug,
+  startAntigravityDebugRequest,
+} from './debug'
 import { generateFingerprint } from './fingerprint'
 import {
   __testExports,
@@ -2555,6 +2561,133 @@ describe('request.ts', () => {
   })
 
   describe('transformAntigravityResponse', () => {
+    it('bounds tool-rich HTTP 400 and 429 errors without tool JSON', async () => {
+      const logDir = mkdtempSync(join(tmpdir(), 'agy-tool-error-debug-'))
+      const schemaMarker = 'private_tool_schema_marker_000'
+      const sourceUrl =
+        'https://generativelanguage.googleapis.com/v1beta/models/antigravity-claude-sonnet-5-5-low:generateContent'
+      const tools = Array.from({ length: 200 }, (_, index) => ({
+        function: {
+          name: `debug_tool_${String(index).padStart(3, '0')}`,
+          description: `Tool ${index}`,
+          parameters: {
+            type: 'object',
+            properties: {
+              input: {
+                type: 'string',
+                description: `${index === 0 ? schemaMarker : `schema_${index}`} ${'x'.repeat(96)}`,
+              },
+            },
+            required: ['input'],
+          },
+        },
+      }))
+
+      try {
+        initializeDebug({
+          ...DEFAULT_CONFIG,
+          debug: true,
+          debug_tui: false,
+          log_dir: logDir,
+        })
+
+        const prepared = prepareAntigravityRequest(
+          sourceUrl,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: 'Use the tools' }] }],
+              tools,
+            }),
+          },
+          'access-token',
+          'tool-error-project',
+          undefined,
+          false,
+          { claudeToolHardening: false },
+        )
+        const debugContext = startAntigravityDebugRequest({
+          originalUrl: sourceUrl,
+          resolvedUrl: String(prepared.request),
+          method: 'POST',
+          headers: prepared.init.headers,
+          body: String(prepared.init.body),
+          streaming: prepared.streaming,
+          projectId: prepared.projectId,
+        })
+
+        for (const status of [400, 429]) {
+          const response = new Response(
+            JSON.stringify({
+              error: {
+                code: status,
+                message: 'Upstream rejected request',
+                status:
+                  status === 429 ? 'RESOURCE_EXHAUSTED' : 'INVALID_ARGUMENT',
+              },
+            }),
+            {
+              status,
+              headers: {
+                'content-type': 'application/json',
+                'x-request-id': `request-${status}`,
+              },
+            },
+          )
+          const transformed = await transformAntigravityResponse(
+            response,
+            prepared.streaming,
+            debugContext,
+            prepared.requestedModel,
+            prepared.projectId,
+            prepared.endpoint,
+            prepared.effectiveModel,
+            prepared.sessionId,
+            prepared.toolDebugMissing,
+            prepared.toolDebugSummary,
+          )
+          const errorBody = (await transformed.json()) as {
+            error: { code: number; message: string; status: string }
+          }
+
+          expect(transformed.status).toBe(status)
+          expect(errorBody.error.code).toBe(status)
+          expect(errorBody.error.status).toBe(
+            status === 429 ? 'RESOURCE_EXHAUSTED' : 'INVALID_ARGUMENT',
+          )
+          expect(errorBody.error.message.length).toBeLessThan(4_000)
+          expect(errorBody.error.message).not.toContain(schemaMarker)
+          expect(errorBody.error.message).toContain('[Debug Info]')
+          expect(errorBody.error.message).toContain('Requested Model:')
+          expect(errorBody.error.message).toContain('Effective Model:')
+          expect(errorBody.error.message).toContain(
+            'Project: tool-error-project',
+          )
+          expect(errorBody.error.message).toContain('Endpoint:')
+          expect(errorBody.error.message).toContain(`Status: ${status}`)
+          expect(errorBody.error.message).toContain(
+            `Request ID: request-${status}`,
+          )
+          expect(errorBody.error.message).toContain('Tool Debug Missing: 0')
+          expect(errorBody.error.message).toContain(
+            'Tool Debug Summary: decl=debug_tool_000,src=function/custom,hasSchema=y',
+          )
+        }
+
+        await closeDebugLog()
+        const logFile = readdirSync(logDir).find((file) =>
+          file.endsWith('.log'),
+        )
+        expect(logFile).toBeTruthy()
+        const debugLog = readFileSync(join(logDir, logFile!), 'utf8')
+        expect(debugLog).toContain(schemaMarker)
+      } finally {
+        await closeDebugLog()
+        initializeDebug(DEFAULT_CONFIG)
+        rmSync(logDir, { recursive: true, force: true })
+      }
+    })
+
     it('injects [ThinkingResolution] details when debug_tui is enabled', async () => {
       initializeDebug({
         ...DEFAULT_CONFIG,
@@ -2587,7 +2720,6 @@ describe('request.ts', () => {
         'session-1',
         0,
         'summary',
-        undefined,
         [
           'status=500 INTERNAL',
           'endpoint=https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent',

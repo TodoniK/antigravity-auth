@@ -1427,7 +1427,7 @@ describe('createRequestExecutor vault admissions', () => {
       wire: {
         ...WIRE,
         transformResponse: async (...args) => {
-          diagnostics.push(...(args[11] ?? []))
+          diagnostics.push(...(args[10] ?? []))
           return WIRE.transformResponse(...args)
         },
       },

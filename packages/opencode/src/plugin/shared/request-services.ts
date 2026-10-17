@@ -984,7 +984,6 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       sessionId?: string
       toolDebugMissing?: number
       toolDebugSummary?: string
-      toolDebugPayload?: string
       dumpContext?: ReturnType<GeminiDumpState['dumpRequest']>
     }
 
@@ -1803,7 +1802,6 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               sessionId: prepared.sessionId,
               toolDebugMissing: prepared.toolDebugMissing,
               toolDebugSummary: prepared.toolDebugSummary,
-              toolDebugPayload: prepared.toolDebugPayload,
               dumpContext,
             })
 
@@ -2390,7 +2388,6 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               prepared.sessionId,
               prepared.toolDebugMissing,
               prepared.toolDebugSummary,
-              prepared.toolDebugPayload,
               debugLines,
               dumpContext,
             )
@@ -2585,7 +2582,6 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               lastFailure.sessionId,
               lastFailure.toolDebugMissing,
               lastFailure.toolDebugSummary,
-              lastFailure.toolDebugPayload,
               debugLines,
               lastFailure.dumpContext,
             )
@@ -2609,7 +2605,6 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               lastFailure.sessionId,
               lastFailure.toolDebugMissing,
               lastFailure.toolDebugSummary,
-              lastFailure.toolDebugPayload,
               debugLines,
               lastFailure.dumpContext,
             )
@@ -2635,7 +2630,6 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           lastFailure.sessionId,
           lastFailure.toolDebugMissing,
           lastFailure.toolDebugSummary,
-          lastFailure.toolDebugPayload,
           debugLines,
           lastFailure.dumpContext,
         )

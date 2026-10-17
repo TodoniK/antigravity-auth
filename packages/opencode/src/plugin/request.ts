@@ -1485,7 +1485,6 @@ function prepareAntigravityRequestIn(
   sessionId?: string
   toolDebugMissing?: number
   toolDebugSummary?: string
-  toolDebugPayload?: string
   needsSignedThinkingWarmup?: boolean
   headerStyle: 'antigravity'
   thinkingRecoveryMessage?: string
@@ -1495,7 +1494,6 @@ function prepareAntigravityRequestIn(
   let resolvedProjectId = projectId?.trim() || ''
   let toolDebugMissing = 0
   const toolDebugSummaries: string[] = []
-  let toolDebugPayload: string | undefined
   let sessionId: string | undefined
   let needsSignedThinkingWarmup = false
   let thinkingRecoveryMessage: string | undefined
@@ -2166,12 +2164,6 @@ function prepareAntigravityRequestIn(
             toolDebugSummaries.push(...geminiResult.toolDebugSummaries)
           }
 
-          try {
-            toolDebugPayload = JSON.stringify(requestPayload.tools)
-          } catch {
-            toolDebugPayload = undefined
-          }
-
           // Apply Claude tool hardening (ported from LLM-API-Key-Proxy)
           // Injects parameter signatures into descriptions and adds system instruction
           // Can be disabled via config.claude_tool_hardening = false to reduce context size
@@ -2553,7 +2545,6 @@ function prepareAntigravityRequestIn(
     sessionId,
     toolDebugMissing,
     toolDebugSummary: toolDebugSummaries.slice(0, 20).join(' | '),
-    toolDebugPayload,
     needsSignedThinkingWarmup,
     headerStyle: 'antigravity',
     thinkingRecoveryMessage,
@@ -2669,7 +2660,6 @@ async function transformAntigravityResponseIn(
   sessionId?: string,
   toolDebugMissing?: number,
   toolDebugSummary?: string,
-  toolDebugPayload?: string,
   debugLines?: string[],
   dumpContext?: GeminiDumpContext | null,
 ): Promise<Response> {
@@ -2782,7 +2772,7 @@ async function transformAntigravityResponseIn(
             ? errorBody.error.message
             : 'Unknown error'
         const errorType = detectErrorType(rawErrorMessage)
-        const debugInfo = `\n\n[Debug Info]\nRequested Model: ${requestedModel || 'Unknown'}\nEffective Model: ${effectiveModel || 'Unknown'}\nProject: ${projectId || 'Unknown'}\nEndpoint: ${endpoint || 'Unknown'}\nStatus: ${response.status}\nRequest ID: ${headers.get('x-request-id') || 'N/A'}${toolDebugMissing !== undefined ? `\nTool Debug Missing: ${toolDebugMissing}` : ''}${toolDebugSummary ? `\nTool Debug Summary: ${toolDebugSummary}` : ''}${toolDebugPayload ? `\nTool Debug Payload: ${toolDebugPayload}` : ''}`
+        const debugInfo = `\n\n[Debug Info]\nRequested Model: ${requestedModel || 'Unknown'}\nEffective Model: ${effectiveModel || 'Unknown'}\nProject: ${projectId || 'Unknown'}\nEndpoint: ${endpoint || 'Unknown'}\nStatus: ${response.status}\nRequest ID: ${headers.get('x-request-id') || 'N/A'}${toolDebugMissing !== undefined ? `\nTool Debug Missing: ${toolDebugMissing}` : ''}${toolDebugSummary ? `\nTool Debug Summary: ${toolDebugSummary}` : ''}`
         const injectedDebug = debugText ? `\n\n${debugText}` : ''
         errorBody.error.message = rawErrorMessage + debugInfo + injectedDebug
 

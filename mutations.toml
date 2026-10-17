@@ -1451,3 +1451,20 @@ runner = "command"
 command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/fetch-interceptor.test.ts -t \"$1\"", "--", "{test}"]
 test_count_pattern = "Ran {count} test"
 expect_red = ['^createFetchInterceptor\svault\scustody\ssource\sa\srequest\swhen\sthe\sapproved\svault\sserves\sno\saccounts\ssays\sno\sgrant\sexists\sand\sgives\sthe\sgrant\scommand\swhen\sthe\svault\sreports\szero\sgrants$', '^createFetchInterceptor\svault\scustody\ssource\sa\srequest\swhen\sthe\sapproved\svault\sserves\sno\saccounts\ssays\sthe\sgrant\sreaches\sno\slogin\sand\sgives\sthe\sreclassify\sand\sstatus\scommands\swhen\sa\sgrant\sexists$', '^createFetchInterceptor\svault\scustody\ssource\sa\srequest\swhen\sthe\sapproved\svault\sserves\sno\saccounts\skeeps\sthe\sgeneral\sAccounts\smenu\sline\seven\swhen\sthe\srequest\snames\sthe\scause$']
+
+[[control]]
+id = "request-error-tool-payload-size"
+guards = "Tool-rich request errors stay bounded and omit full tool schema JSON while retaining debug headers."
+file = "packages/opencode/src/plugin/request.ts"
+old = '''                toolDebugSummaries.push(
+                  `decl=${name},src=${source},hasSchema=${schema ? 'y' : 'n'}`,
+                )'''
+new = '''                toolDebugSummaries.push(
+                  `decl=${name},src=${source},hasSchema=${schema ? 'y' : 'n'}; Tool Debug Payload: ${JSON.stringify(requestPayload.tools)}`,
+                ) // NON-VACUITY BREAK'''
+test_file = "packages/opencode/src/plugin/request.test.ts"
+list_command = ["bun", "scripts/list-bun-tests.mjs", "--cwd", ".", "packages/opencode/src/plugin/request.test.ts", "-t", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/request.test.ts -t \"$1\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^request.ts\stransformAntigravityResponse\sbounds\stool-rich\sHTTP\s400\sand\s429\serrors\swithout\stool\sJSON$']

@@ -42,7 +42,7 @@ Each cached quota entry carries `{ remainingFraction, resetTime }` per quota gro
 - **TTL:** `soft_quota_cache_ttl_minutes = "auto"` resolves to `max(2 × refresh_interval, 10)` minutes.
 - **Soft threshold:** `soft_quota_threshold_percent` (default `80`) skips accounts at or above the usage threshold as if rate-limited; `100` disables this filter.
 - **Stale/missing fail-open:** readings older than TTL, or never refreshed, are unknown and allowed through the soft check so cold starts cannot deadlock.
-- **All exhausted:** wait for eligible quota/reset/cooldown. `max_rate_limit_wait_seconds` (default `300`, `0` removes the cap) limits each wait, not total request duration. A proposed wait above the cap fails rather than inventing success.
+- **All exhausted:** wait for eligible quota/reset/cooldown. `max_rate_limit_wait_seconds` (default `300`, `0` removes the cap) is one cumulative budget for a continuous period with no eligible account, shared by rate-limit and soft-quota waits. Each sleep is capped at the remaining budget; selecting an eligible account resets it. A proposed wait above the full cap still fails fast, and an exhausted budget ends with a native error rather than inventing success.
 - **Proactive rotation:** below `proactive_rotation_threshold_percent` remaining (default `20`), the next request selects a warm-cache account.
 
 ## Operator killswitch

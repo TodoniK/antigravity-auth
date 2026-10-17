@@ -194,7 +194,7 @@ Users have reported success with this approach:
 - Use shorter sessions
 - Avoid parallel/retry-heavy workflows (e.g., spawning many subagents at once)
 - If using oh-my-opencode, consider reducing concurrent agent spawns
-- Set `max_rate_limit_wait_seconds: 0` to fail fast instead of retrying
+- Lower `max_rate_limit_wait_seconds` to bound cumulative all-account waits (`0` disables the cap and waits indefinitely)
 
 </details>
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { getEventListeners } from 'node:events'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -623,6 +623,183 @@ function okJson(): Response {
 const NON_STREAM_URL = modelUrl('gemini-3-flash', 'generateContent')
 const STREAM_URL = modelUrl('gemini-3-flash')
 const CLAUDE_URL = modelUrl('claude-sonnet-5-5-low', 'generateContent')
+
+describe('createRequestExecutor cumulative no-account wait budget', () => {
+  function blockedHarness(
+    kind: 'rate' | 'soft' | 'mixed',
+    options: {
+      unlimited?: boolean
+      cancel?: AbortController
+      resetAfterSend?: boolean
+    } = {},
+  ) {
+    let now = FIXED_NOW
+    const delays: number[] = []
+    const h = harness({
+      pool: makePool(options.resetAfterSend ? 2 : 1),
+      config: { max_rate_limit_wait_seconds: options.unlimited ? 0 : 1 },
+      respond: async (_call, index) =>
+        options.resetAfterSend && index === 0
+          ? new Response('account is ineligible', { status: 403 })
+          : okJson(),
+    })
+    h.deps.classifyAccessError = () => ({
+      accountIneligible: true,
+      validationRequired: false,
+    })
+    const dateSpy = spyOn(Date, 'now').mockImplementation(() => now)
+    const realTimeout = globalThis.setTimeout
+    const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(((
+      callback: () => void,
+      delay: number,
+    ) => {
+      const handle = realTimeout(() => {}, 2 ** 30)
+      handle.unref()
+      // Run the sleep only after its abort listener has been installed.
+      queueMicrotask(() => {
+        clearTimeout(handle)
+        delays.push(delay)
+        if (options.cancel) {
+          options.cancel.abort(
+            new Error('cancelled while all accounts blocked'),
+          )
+          return
+        }
+        now += delay
+        callback()
+      })
+      return handle
+    }) as typeof setTimeout)
+    const select = h.pool.getCurrentOrNextForFamily.bind(h.pool)
+    // Release on the base implementation too, so a broken budget fails an
+    // assertion rather than leaving an unbounded fake-clock loop running.
+    const selectionSpy = spyOn(
+      h.pool,
+      'getCurrentOrNextForFamily',
+    ).mockImplementation((...args) => {
+      const releaseAt =
+        options.resetAfterSend && h.calls.length === 0 ? 800 : 1_600
+      return now - FIXED_NOW >= releaseAt ? select(...args) : null
+    })
+    const quotaSpy = spyOn(
+      h.pool,
+      'areAllAccountsOverSoftQuota',
+    ).mockImplementation(
+      () => kind === 'soft' || (kind === 'mixed' && delays.length % 2 === 1),
+    )
+    const rateSpy = spyOn(h.pool, 'getMinWaitTimeForFamily').mockReturnValue(
+      400,
+    )
+    const softSpy = spyOn(h.pool, 'getMinWaitTimeForSoftQuota').mockReturnValue(
+      400,
+    )
+    const saveSpy = spyOn(h.pool, 'requestSaveToDisk').mockImplementation(
+      () => {},
+    )
+    return {
+      ...h,
+      delays,
+      elapsed: () => now - FIXED_NOW,
+      restore() {
+        for (const spy of [
+          dateSpy,
+          timerSpy,
+          selectionSpy,
+          quotaSpy,
+          rateSpy,
+          softSpy,
+          saveSpy,
+        ])
+          spy.mockRestore()
+      },
+    }
+  }
+
+  it('resets the budget when an eligible account is dispatched before another blocked period', async () => {
+    const h = blockedHarness('mixed', { resetAfterSend: true })
+    const executor = createRequestExecutor(h.deps)
+    try {
+      const response = await executor.execute(NON_STREAM_URL, CHAT_INIT())
+      expect(response.status).toBe(200)
+      expect(h.elapsed()).toBe(1_600)
+      expect(h.delays).toEqual([400, 400, 400, 400])
+      expect(h.calls).toHaveLength(2)
+      expect(new Headers(h.calls[0]?.init?.headers).get('authorization')).toBe(
+        'Bearer access-fresh',
+      )
+      expect(h.pool.getAccounts()[0]?.enabled).toBe(false)
+    } finally {
+      await executor.dispose()
+      h.restore()
+    }
+  })
+
+  for (const kind of ['rate', 'soft', 'mixed'] as const) {
+    it(`bounds repeated short ${kind} waits by one cumulative budget`, async () => {
+      const h = blockedHarness(kind)
+      const executor = createRequestExecutor(h.deps)
+      try {
+        const response = await executor.execute(NON_STREAM_URL, CHAT_INIT())
+        expect(response.status).toBe(412)
+        expect(h.elapsed()).toBe(1_000)
+        expect(h.delays).toEqual([400, 400, 200])
+        expect(h.calls).toHaveLength(0)
+        expect(response.headers.get('content-type')).toBe('application/json')
+        expect(response.headers.get('retry-after')).toBe('1')
+        expect(await response.json()).toEqual({
+          error: {
+            code: 412,
+            status: 'FAILED_PRECONDITION',
+            message:
+              kind === 'soft' || kind === 'mixed'
+                ? 'Antigravity account pool is unavailable under the quota protection policy. Add accounts, wait for quota reset, or disable soft quota protection. Quota resets in 1s.'
+                : 'Antigravity account pool has no account available within the configured wait limit. Add accounts with `opencode auth login` or wait for quota reset. Quota resets in 1s.',
+          },
+        })
+      } finally {
+        await executor.dispose()
+        h.restore()
+      }
+    })
+  }
+
+  for (const kind of ['rate', 'soft', 'mixed'] as const) {
+    it(`keeps zero as unlimited for ${kind} waits and sends once eligible`, async () => {
+      const h = blockedHarness(kind, { unlimited: true })
+      const executor = createRequestExecutor(h.deps)
+      try {
+        const response = await executor.execute(NON_STREAM_URL, CHAT_INIT())
+        expect(response.status).toBe(200)
+        expect(h.elapsed()).toBe(1_600)
+        expect(h.delays).toEqual([400, 400, 400, 400])
+        expect(h.calls).toHaveLength(1)
+      } finally {
+        await executor.dispose()
+        h.restore()
+      }
+    })
+  }
+
+  for (const kind of ['rate', 'soft'] as const) {
+    it(`cancels a ${kind} no-account wait without advancing the clock or sending`, async () => {
+      const caller = new AbortController()
+      const h = blockedHarness(kind, { cancel: caller })
+      const executor = createRequestExecutor(h.deps)
+      try {
+        await expect(
+          executor.execute(NON_STREAM_URL, CHAT_INIT(caller.signal)),
+        ).rejects.toThrow('cancelled while all accounts blocked')
+        expect(h.elapsed()).toBe(0)
+        expect(h.delays).toEqual([400])
+        expect(h.calls).toHaveLength(0)
+        expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0)
+      } finally {
+        await executor.dispose()
+        h.restore()
+      }
+    })
+  }
+})
 
 it('disposal drains successful-send quota after-work without delaying the reply', async () => {
   const reached = Promise.withResolvers<void>()

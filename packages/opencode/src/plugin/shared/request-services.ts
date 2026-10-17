@@ -1044,6 +1044,8 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     let previousAccountIndex = -1
     let needsCacheWarmup = false
     let localRecaptureUsed = false
+    const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 300) * 1000
+    let allAccountsBlockedAt: number | undefined
 
     while (true) {
       await assertAdmission()
@@ -1162,6 +1164,15 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       }
 
       if (!account) {
+        // Rate-limit and soft-quota waits belong to the same blocked period.
+        // Selection of an eligible account below starts a fresh budget.
+        allAccountsBlockedAt ??= Date.now()
+        const blockedSince = allAccountsBlockedAt
+        const remainingWaitMs = () =>
+          maxWaitMs > 0
+            ? Math.max(0, maxWaitMs - (Date.now() - blockedSince))
+            : Number.POSITIVE_INFINITY
+
         if (
           accountManager.areAllAccountsOverSoftQuota(
             family,
@@ -1177,10 +1188,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             softQuotaCacheTtlMs,
             model,
           )
-          const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 300) * 1000
-
           if (
             softQuotaWaitMs === null ||
+            remainingWaitMs() <= 0 ||
             (maxWaitMs > 0 && softQuotaWaitMs > maxWaitMs)
           ) {
             const waitTimeFormatted = softQuotaWaitMs
@@ -1209,7 +1219,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             retryState.markSoftQuotaToastShown()
           }
 
-          await sleep(softQuotaWaitMs, abortSignal)
+          await sleep(Math.min(softQuotaWaitMs, remainingWaitMs()), abortSignal)
           continue
         }
 
@@ -1231,8 +1241,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           )
         }
 
-        const maxWaitMs = (config.max_rate_limit_wait_seconds ?? 300) * 1000
-        if (maxWaitMs > 0 && waitMs > maxWaitMs) {
+        if (remainingWaitMs() <= 0 || (maxWaitMs > 0 && waitMs > maxWaitMs)) {
           const waitTimeFormatted = formatWaitTime(waitMs)
           await showToast(
             `Rate limited for ${waitTimeFormatted}. Try again later or add another account.`,
@@ -1256,11 +1265,12 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           retryState.markRateLimitToastShown()
         }
 
-        await sleep(waitMs, abortSignal)
+        await sleep(Math.min(waitMs, remainingWaitMs()), abortSignal)
         continue
       }
 
-      // Account is available - reset the toast flag
+      // An eligible account ends the contiguous all-accounts-blocked period.
+      allAccountsBlockedAt = undefined
       retryState.resetAllAccountsBlockedToasts()
 
       pushDebug(

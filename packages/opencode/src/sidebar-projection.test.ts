@@ -57,21 +57,21 @@ describe('projectAccount', () => {
     expect(projected.statusTone).toBe('ok')
     expect(projected.quota).toEqual([
       {
-        label: 'Gm',
+        label: 'Gemini',
         remaining: 72,
         figure: '72% left',
         tone: 'ok',
         reset: 'resets 1h30m',
       },
       {
-        label: 'NG 5h',
+        label: 'Other models 5h',
         remaining: 40,
         figure: '40% left',
         tone: 'ok',
         reset: 'resets 30m',
       },
       {
-        label: 'NG 7d',
+        label: 'Other models 7d',
         remaining: 8,
         figure: '8% left',
         tone: 'err',
@@ -85,14 +85,14 @@ describe('projectAccount', () => {
     const projected = projectAccount(account({ quota: {} }), NOW)
     expect(projected.quota).toEqual([
       {
-        label: 'Gm',
+        label: 'Gemini',
         remaining: null,
         figure: 'no quota reading yet',
         tone: 'muted',
         reset: '',
       },
       {
-        label: 'NG',
+        label: 'Other models',
         remaining: null,
         figure: 'no quota reading yet',
         tone: 'muted',

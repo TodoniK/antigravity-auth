@@ -128,9 +128,10 @@ export const GA_TUI_ROOT: TuiRoot = {
 export const TUI_ROOTS: readonly TuiRoot[] = [V1_TUI_ROOT, GA_TUI_ROOT]
 
 /**
- * The GA root reaches only the shared drawer, the host-neutral menu types and
- * the sidebar projection: no OpenCode 1 RPC, port file, sidebar file,
- * preferences, file logger, OpenCode 1 adapter or embedded library module.
+ * The GA root reaches only the shared drawer, the host-neutral menu types,
+ * the sidebar projection and the shared quota layout: no OpenCode 1 RPC, port
+ * file, sidebar file, preferences, file logger, OpenCode 1 adapter or
+ * embedded library module.
  */
 const GA_FORBIDDEN_SOURCE =
   /\/(?:rpc|plugin|antigravity|hooks)\/|\/ga\/(?:server|rpc)\/|\/common-auth-embedded\/(?!quota\/(?:index|codec|format|map|merge|projection)(?:\.d)?\.[jt]s$)|\/(?:sidebar-state|tui-preferences|constants)\.ts$|\/tui\/(?:file-logger|host-v1)\.tsx?$/

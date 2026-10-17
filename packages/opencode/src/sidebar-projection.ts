@@ -91,9 +91,13 @@ export interface ProjectedSidebar {
   readonly notices: readonly string[]
 }
 
+/**
+ * Plain pool names, the same words the sidebars use as group headers. The
+ * `/antigravity` menu's quota lines start each pool with one of them.
+ */
 export const QUOTA_POOL_LABELS: Readonly<Record<ProjectionQuotaKey, string>> = {
-  gemini: 'Gm',
-  'non-gemini': 'NG',
+  gemini: 'Gemini',
+  'non-gemini': 'Other models',
 }
 
 const POOL_ORDER: readonly ProjectionQuotaKey[] = ['gemini', 'non-gemini']

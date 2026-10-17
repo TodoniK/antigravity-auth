@@ -65,6 +65,12 @@ import {
   type MenuSection,
   type MenuUi,
 } from '../../tui/host-api'
+import {
+  ASSUMED_CONTENT_WIDTH,
+  DEFAULT_QUOTA_APPEARANCE,
+  QuotaAccountBlock,
+  type QuotaPalette,
+} from '../../tui/quota-layout'
 
 export const GA_TUI_ID = 'cortexkit.antigravity-auth' as const
 export const GA_RPC_ID = 'antigravity-auth' as const
@@ -1466,7 +1472,19 @@ export async function pollGaOnce(options: GaPollerOptions): Promise<void> {
 
 interface SidebarView {
   readonly scope: GaScope
+  /** The snapshot's accounts; the quota layout reads their stored windows. */
+  readonly accounts: readonly ProjectionAccount[]
   readonly projected: ProjectedSidebar
+  /** The clock reading the projection was made at; the quota rows use it too. */
+  readonly readAt: number
+}
+
+// The GA context carries no theme, so the quota layout keeps the host's
+// default text color everywhere.
+const HOST_COLORS: QuotaPalette = {
+  text: () => undefined,
+  muted: () => undefined,
+  tone: () => undefined,
 }
 
 function GaSidebar(props: {
@@ -1482,39 +1500,53 @@ function GaSidebar(props: {
       ? view.projected.route
       : null
   }
+  // The quota rows are sized to the sidebar's width so none of them wraps.
+  // Layout reports the width during a render pass, so the signal is updated
+  // afterwards rather than rebuilding rows mid-pass.
+  const [contentWidth, setContentWidth] = createSignal(ASSUMED_CONTENT_WIDTH)
+  let titleRow: { width: number } | undefined
+  const measureContentWidth = (): void => {
+    const width = titleRow?.width
+    if (typeof width !== 'number' || width <= 0) return
+    queueMicrotask(() => {
+      if (width !== contentWidth()) setContentWidth(width)
+    })
+  }
   return (
     <box flexDirection='column' width='100%'>
-      <text>
-        <b>Antigravity</b>
-      </text>
+      <box
+        ref={(element) => {
+          titleRow = element
+        }}
+        onSizeChange={measureContentWidth}
+        width='100%'
+        flexDirection='row'
+      >
+        <text>
+          <b>Antigravity</b>
+        </text>
+      </box>
       <Show when={props.view()} fallback={<text>connecting…</text>}>
         {(view) => (
           <>
             <For each={view().projected.accounts}>
-              {(account) => (
-                <box flexDirection='column' width='100%'>
-                  <box
-                    flexDirection='row'
-                    justifyContent='space-between'
-                    width='100%'
-                  >
-                    <text>{account.label}</text>
-                    <text>{account.status}</text>
-                  </box>
-                  <For each={account.quota}>
-                    {(row) => (
-                      <box
-                        flexDirection='row'
-                        justifyContent='space-between'
-                        width='100%'
-                      >
-                        <text>{`${row.label.padEnd(6)}${row.figure}`}</text>
-                        <text>{row.reset}</text>
-                      </box>
-                    )}
-                  </For>
-                  <text>{`  ${account.health}`}</text>
-                </box>
+              {(account, index) => (
+                <Show when={view().accounts[index()]}>
+                  {(source) => (
+                    <QuotaAccountBlock
+                      palette={HOST_COLORS}
+                      appearance={DEFAULT_QUOTA_APPEARANCE}
+                      account={source()}
+                      status={account.status}
+                      statusTone={account.statusTone}
+                      now={() => view().readAt}
+                      width={contentWidth}
+                      marginTop={index() === 0 ? 0 : 1}
+                    >
+                      <text>{`  ${account.health}`}</text>
+                    </QuotaAccountBlock>
+                  )}
+                </Show>
               )}
             </For>
             <Show when={route()}>
@@ -1575,14 +1607,17 @@ export function setupGaTui(
 
   const showSnapshot = (snapshot: GaSnapshot) => {
     latest.set(scopeKey(snapshot.scope), snapshot)
+    const readAt = now()
     setView({
       scope: snapshot.scope,
+      accounts: snapshot.accounts,
       projected: projectSidebar({
         accounts: snapshot.accounts,
         route: snapshot.route,
         status: snapshot.status,
-        now: now(),
+        now: readAt,
       }),
+      readAt,
     })
   }
 

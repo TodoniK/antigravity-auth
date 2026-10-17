@@ -2209,7 +2209,11 @@ describe('GA TUI setup', () => {
     await settle()
     const frame = view.captureCharFrame()
     expect(frame).toContain('Account 1')
-    expect(frame).toContain('Gm    55%')
+    // Plain group header and a bar row; the old `Gm    55%` label is gone.
+    const lines = frame.split('\n').map((line) => line.trim())
+    expect(lines).toContain('Gemini')
+    expect(lines.some((line) => /^[█░]+ 55% left$/.test(line))).toBe(true)
+    expect(frame).not.toMatch(/\bGm\b/)
     expect(frame).toContain('Route Account 1 · gemini · antigravity')
     view.renderer.destroy()
 
@@ -2250,12 +2254,15 @@ describe('GA TUI setup', () => {
     })
     try {
       await settle()
+      const lines = view
+        .captureCharFrame()
+        .split('\n')
+        .map((line) => line.trim())
+      expect(lines).toContain('Gemini')
+      // The reset span keeps both units and sits right-aligned on the bar row.
       expect(
-        view
-          .captureCharFrame()
-          .split('\n')
-          .map((line) => line.trim()),
-      ).toContain('Gm    55% left     resets 23h59m')
+        lines.some((line) => /^[█░]{10} 55% left\s+23h59m$/.test(line)),
+      ).toBe(true)
     } finally {
       view.renderer.destroy()
       await cleanup()
@@ -2444,6 +2451,7 @@ describe('TUI module graph', () => {
         join(SRC, 'sidebar-projection.ts'),
         join(SRC, 'tui', 'command-dialogs.tsx'),
         join(SRC, 'tui', 'host-api.ts'),
+        join(SRC, 'tui', 'quota-layout.tsx'),
       ].sort(),
     )
   })

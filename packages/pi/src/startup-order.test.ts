@@ -57,6 +57,8 @@ const client: ClaustrumScopedClient = {
         email: 'synthetic@example.test',
       },
     ],
+    grants: undefined,
+    grantTuples: undefined,
   }),
   getScoped: async (input) => {
     expect(input.credentialId).toBe('cred-a')

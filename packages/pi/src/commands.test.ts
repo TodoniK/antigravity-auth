@@ -50,6 +50,8 @@ function loopbackVault(): ClaustrumScopedClient {
               email: 'a@example.com',
             },
           ],
+      grants: undefined,
+      grantTuples: undefined,
     }),
     getScoped: async () => {
       throw new Error('the menu never fetches a credential')

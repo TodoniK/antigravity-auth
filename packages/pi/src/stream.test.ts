@@ -419,6 +419,8 @@ describe('selected credential boundary', () => {
                 accountId: 'account-a',
               },
             ],
+            grants: undefined,
+            grantTuples: undefined,
           }),
           getScoped: async () => {
             admissions++

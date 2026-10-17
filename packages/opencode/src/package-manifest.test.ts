@@ -205,7 +205,7 @@ describe('published dependency ranges', () => {
     // Setup statically imports enrollment; clients stay external and share the core copy.
     expect(ourManifest.dependencies).toEqual({
       '@cortexkit/antigravity-auth-core': coreManifest.version,
-      '@cortexkit/claustrum-client': '0.9.0',
+      '@cortexkit/claustrum-client': '0.10.0',
       '@cortexkit/subc-client': '0.16.1',
       '@cortexkit/private-files': '0.2.1',
       'jsonc-parser': '^3.3.1',

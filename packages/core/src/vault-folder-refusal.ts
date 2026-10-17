@@ -13,7 +13,7 @@
  */
 
 /**
- * `@cortexkit/claustrum-client` 0.9.0 (`notPrivate` in private-path.js):
+ * `@cortexkit/claustrum-client` 0.10.0 (`notPrivate` in private-path.js):
  * `enrollment token folder <path> is not private: <reason>`.
  */
 const CLIENT_REFUSAL = /^enrollment token folder (.+) is not private: (.+)$/s

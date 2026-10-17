@@ -848,6 +848,8 @@ async function realSource(vault: LocalVault) {
           vault.rows.map((entry) => [entry.id, entry.state, entry.accountId]),
         ),
         rows: vault.rows,
+        grants: undefined,
+        grantTuples: undefined,
       }
     },
     async getScoped(input) {

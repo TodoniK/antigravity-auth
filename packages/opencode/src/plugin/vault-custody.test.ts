@@ -549,7 +549,12 @@ describe('Vault section enrollment guidance', () => {
     service.approveNext()
     const { custody } = custodyWith(async () => undefined, service, {
       connect: async () => ({
-        listScoped: async () => ({ view: 'view-1', rows: [] }),
+        listScoped: async () => ({
+          view: 'view-1',
+          rows: [],
+          grants: undefined,
+          grantTuples: undefined,
+        }),
         getScoped: async () => {
           throw new Error('the menu never fetches a credential')
         },
@@ -826,6 +831,8 @@ it('starts vault-authority discovery when the request joins an old local observa
               refreshAdapter: 'antigravity',
             },
           ],
+          grants: undefined,
+          grantTuples: undefined,
         }
       },
       getScoped: async () => {

@@ -63,6 +63,14 @@ export type VaultReporterSource = Parameters<
   ClaustrumConsumerInstance['reportFailure']
 >[2]
 export type VaultLogger = NonNullable<VaultConsumerOptions['logger']>
+/**
+ * What the vault's latest account listing reported about this host's grants:
+ * how many it holds and what each one selects. Only a known report has this
+ * shape; an unknown one is `undefined` at each use.
+ */
+export type VaultGrantReach = NonNullable<
+  ReturnType<ClaustrumConsumerInstance['grantReach']>
+>
 
 /** The consumer methods this source calls. */
 export type VaultClaustrumConsumer = Pick<
@@ -75,6 +83,7 @@ export type VaultClaustrumConsumer = Pick<
   | 'decline'
   | 'accept'
   | 'close'
+  | 'grantReach'
 >
 
 /**
@@ -266,6 +275,12 @@ export interface AntigravityVaultAccountSource {
   ): Promise<VaultProviderStateCommitResult>
   decline(ref: VaultRouteRef): Promise<void>
   accept(ref: VaultRouteRef): Promise<void>
+  /**
+   * The grants named by the latest discovery, which explain an empty roster.
+   * Undefined means unknown, never zero grants: nothing was discovered yet, the
+   * vault is too old to report grants, or the source is closed.
+   */
+  grantReach(): VaultGrantReach | undefined
   /** Close the vault connection; later calls are refused. */
   close(): void
 }
@@ -638,6 +653,7 @@ export function createAntigravityVaultAccountSource(
       assertOpen()
       await consumer.accept(ref.routeId)
     },
+    grantReach: () => (closed ? undefined : consumer.grantReach()),
     close: () => {
       if (closed) return
       closed = true

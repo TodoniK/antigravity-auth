@@ -89,6 +89,7 @@ async function fixture(
     reportServedStatus: async () => false,
     decline: async () => {},
     accept: async () => {},
+    grantReach: () => undefined,
     refresh: async () => {},
     routes: () => [ref],
     attribution: () => ({ ...ref, recordVersion: 1 }),

@@ -18,6 +18,7 @@ import {
   createAntigravityVaultAccountSource,
   enrollmentAuthority,
   loadCommonAuthClaustrum,
+  type VaultGrantReach,
   type VaultRouteRef,
 } from '@cortexkit/antigravity-auth-core'
 import type {
@@ -45,7 +46,7 @@ import {
 /** The shared vault account source operations Pi's request path and setup use. */
 export type PiVaultAccountSource = Pick<
   AntigravityVaultAccountSource,
-  'refresh' | 'routes' | 'send' | 'decline' | 'accept'
+  'refresh' | 'routes' | 'send' | 'decline' | 'accept' | 'grantReach'
 >
 
 type PiVaultRouteRef = VaultRouteRef
@@ -138,6 +139,8 @@ export function createPiVaultAccountsPort(
   // Kept from the last listing so decline/accept act on the account the user
   // picked, never on a route id that now names another account.
   let lastRows = new Map<string, PiVaultRouteRef>()
+  // Pi's grants as reported by the vault refresh that the last listing ran.
+  let lastReach: VaultGrantReach | undefined
 
   const refFor = (routeId: string): PiVaultRouteRef => {
     const ref = lastRows.get(routeId)
@@ -151,7 +154,9 @@ export function createPiVaultAccountsPort(
   return {
     list: async () => {
       const { source } = await openCustody(options)
+      lastReach = undefined
       const roster = await source.refresh()
+      lastReach = source.grantReach()
       const rows = new Map<string, PiVaultRouteRef>()
       const choices: PiVaultAccountChoice[] = []
       for (const row of roster?.rows ?? []) {
@@ -180,6 +185,7 @@ export function createPiVaultAccountsPort(
       lastRows = rows
       return choices
     },
+    grantReach: () => lastReach,
     decline: async (routeId) => {
       const { source } = await openCustody(options)
       await source.decline(refFor(routeId))

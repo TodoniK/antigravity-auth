@@ -11,10 +11,14 @@ import { readFileSync } from 'node:fs'
 import type { CommonAuthClaustrumModule } from '@cortexkit/antigravity-auth-core'
 import {
   ANTIGRAVITY_PROVIDER_ID,
+  emptyVaultRosterCause,
   enrollmentAuthority,
   sharedVaultTokenFolder,
   sharedVaultTokenFolderOutcome,
   sharedVaultTokenFolderText,
+  VAULT_RECLASSIFY_COMMAND,
+  VAULT_STATUS_COMMAND,
+  type VaultGrantReach,
 } from '@cortexkit/antigravity-auth-core'
 import { writeJsonAtomic } from '@cortexkit/antigravity-auth-core/atomic-write'
 import type {
@@ -143,6 +147,12 @@ export interface PiVaultAccountChoice {
 export interface PiVaultAccountsPort {
   /** Reload and save the list of permitted vault accounts, then return it to the menu. */
   list(): Promise<readonly PiVaultAccountChoice[]>
+  /**
+   * Pi's grants as the vault reported them when `list` last loaded the
+   * accounts. They explain why that list is empty. Undefined means unknown,
+   * never zero grants.
+   */
+  grantReach(): VaultGrantReach | undefined
   decline(routeId: string): Promise<void>
   accept(routeId: string): Promise<void>
 }
@@ -415,12 +425,33 @@ function piPendingExistsGuidance(): string[] {
   ]
 }
 
-/** Shown when Pi is approved but the vault lists no Antigravity accounts for it. */
-export function piNoVaultAccountsGuidance(): string[] {
-  return [
-    "The vault operator approved Pi, but Pi can't see any Antigravity accounts in the vault yet.",
-    `If the operator has not granted Pi read access yet, they run: ${PI_VAULT_GRANT_COMMAND}`,
-  ]
+/**
+ * Shown when Pi is approved but the vault lists no Antigravity accounts for
+ * it. When the vault reported Pi's grants, they tell the two causes apart: no
+ * grant at all, or a grant that matches no login. When the grants are
+ * unknown, the general message names the grant command.
+ */
+export function piNoVaultAccountsGuidance(
+  reach: VaultGrantReach | undefined,
+): string[] {
+  switch (emptyVaultRosterCause(reach)) {
+    case 'no-grant':
+      return [
+        'The vault operator approved Pi. The vault has not granted Pi read access.',
+        `The vault operator grants it with: ${PI_VAULT_GRANT_COMMAND}`,
+      ]
+    case 'grant-reaches-nothing':
+      return [
+        'The vault operator approved Pi. Pi has read access, but it reaches no Antigravity login in the vault.',
+        `The vault operator updates the vault's logins with: ${VAULT_RECLASSIFY_COMMAND}`,
+        `Then they check them with: ${VAULT_STATUS_COMMAND}`,
+      ]
+    case 'unknown':
+      return [
+        "The vault operator approved Pi, but Pi can't see any Antigravity accounts in the vault yet.",
+        `If the operator has not granted Pi read access yet, they run: ${PI_VAULT_GRANT_COMMAND}`,
+      ]
+  }
 }
 
 /** The next steps for an enrollment state that needs the user or the operator to act. */
@@ -579,7 +610,9 @@ export function createPiVaultSection(
     const port = options.accounts?.()
     if (!port) return []
     try {
-      return (await port.list()).length === 0 ? piNoVaultAccountsGuidance() : []
+      return (await port.list()).length === 0
+        ? piNoVaultAccountsGuidance(port.grantReach())
+        : []
     } catch {
       // The Vault section reports an unreachable roster when it is opened;
       // an action result says nothing it cannot confirm.
@@ -661,7 +694,8 @@ export function createPiVaultSection(
                   ],
             })
           }
-          if (listed.length === 0) lines.push(...piNoVaultAccountsGuidance())
+          if (listed.length === 0)
+            lines.push(...piNoVaultAccountsGuidance(port.grantReach()))
           else if (status.mode !== 'custody')
             lines.push(
               'Next: choose Use the vault to have Pi use these accounts.',

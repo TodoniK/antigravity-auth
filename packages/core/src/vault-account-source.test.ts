@@ -145,6 +145,9 @@ function harness(): Harness {
     async accept(routeId: string) {
       h.accepted.push(routeId)
     }
+    grantReach() {
+      return undefined
+    }
     close() {
       h.closed++
     }

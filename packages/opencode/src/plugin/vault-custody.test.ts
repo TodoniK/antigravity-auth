@@ -544,7 +544,18 @@ describe('Vault section enrollment guidance', () => {
     ])
   })
 
-  it('names the missing read grant when the approved vault serves no accounts', async () => {
+  /**
+   * Approve this host's enrollment, let the real consumer discover an empty
+   * roster whose listing reports `grants` and `grantTuples`, then check the
+   * Vault section lines and the request-access action's text.
+   */
+  async function expectEmptyRosterGuidance(
+    grants: number | undefined,
+    grantTuples:
+      | { selectorKind: string; selector: string; operation: string }[]
+      | undefined,
+    expected: string[],
+  ) {
     const service = fakeEnrollmentService()
     service.approveNext()
     const { custody } = custodyWith(async () => undefined, service, {
@@ -552,8 +563,8 @@ describe('Vault section enrollment guidance', () => {
         listScoped: async () => ({
           view: 'view-1',
           rows: [],
-          grants: undefined,
-          grantTuples: undefined,
+          grants,
+          grantTuples,
         }),
         getScoped: async () => {
           throw new Error('the menu never fetches a credential')
@@ -568,18 +579,52 @@ describe('Vault section enrollment guidance', () => {
       expect((await custody.menuSection().build(invocation)).lines).toEqual([
         'Mode: vault',
         'Vault access: approved as antigravity-auth-opencode',
-        ...NO_ACCOUNTS,
+        ...expected,
       ])
       expect(await runAction(custody, 'request-access')).toEqual({
         ok: true,
         text: [
           'Vault access: approved as antigravity-auth-opencode',
-          ...NO_ACCOUNTS,
+          ...expected,
         ].join('\n'),
       })
     } finally {
       await custody.dispose()
     }
+  }
+
+  it('names the missing read grant when the approved vault serves no accounts', async () => {
+    // A vault that does not report grants leaves the cause unknown.
+    await expectEmptyRosterGuidance(undefined, undefined, NO_ACCOUNTS)
+  })
+
+  it('says no grant exists and gives the grant command when the vault reports zero grants', async () => {
+    await expectEmptyRosterGuidance(
+      0,
+      [],
+      [
+        'Vault access is approved. The vault has not granted antigravity-auth-opencode read access.',
+        `The vault operator grants it with: ${GRANT}`,
+      ],
+    )
+  })
+
+  it('says the grant reaches no login and gives the reclassify and status commands when a grant exists', async () => {
+    await expectEmptyRosterGuidance(
+      1,
+      [
+        {
+          selectorKind: 'category',
+          selector: 'antigravity-native',
+          operation: 'read',
+        },
+      ],
+      [
+        'Vault access is approved. antigravity-auth-opencode has read access, but it reaches no Antigravity login in the vault.',
+        "The vault operator updates the vault's logins with: ck auth reclassify --from-registry",
+        'Then they check them with: ck auth status',
+      ],
+    )
   })
 
   it('points an approved host still on local accounts at Serve accounts from the vault', async () => {

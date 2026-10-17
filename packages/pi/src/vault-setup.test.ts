@@ -276,6 +276,7 @@ function accountsPort(accounts: PiVaultAccountChoice[]) {
   const calls: string[] = []
   const port: PiVaultAccountsPort = {
     list: async () => accounts,
+    grantReach: () => undefined,
     decline: async (routeId) => {
       calls.push(`decline:${routeId}`)
     },

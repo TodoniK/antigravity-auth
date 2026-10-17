@@ -50,8 +50,8 @@ function loopbackVault(): ClaustrumScopedClient {
               email: 'a@example.com',
             },
           ],
-      grants: undefined,
-      grantTuples: undefined,
+      grants: rosterGrants.grants,
+      grantTuples: rosterGrants.grantTuples,
     }),
     getScoped: async () => {
       throw new Error('the menu never fetches a credential')
@@ -78,6 +78,11 @@ let dir: string
 let hostSlot: unknown
 /** True when the vault grants this host no Antigravity accounts. */
 let emptyRoster: boolean
+/** The grants the vault names in its listing; both undefined for a vault that names none. */
+let rosterGrants: Pick<
+  Awaited<ReturnType<ClaustrumScopedClient['listScoped']>>,
+  'grants' | 'grantTuples'
+>
 
 beforeEach(async () => {
   dir = await mkdtemp(
@@ -85,6 +90,7 @@ beforeEach(async () => {
   )
   hostSlot = undefined
   emptyRoster = false
+  rosterGrants = { grants: undefined, grantTuples: undefined }
 })
 
 afterEach(async () => {
@@ -317,12 +323,9 @@ describe('Pi /antigravity menu', () => {
     expect(text).not.toContain('account-a')
   })
 
-  it('names the missing read grant when the approved vault serves Pi no accounts', async () => {
+  /** Approve with an empty roster and check every place the menu explains it. */
+  async function expectEmptyRosterGuidance(grant: string[]) {
     emptyRoster = true
-    const grant = [
-      "The vault operator approved Pi, but Pi can't see any Antigravity accounts in the vault yet.",
-      'If the operator has not granted Pi read access yet, they run: ck auth grant --principal enrolled:antigravity-auth-pi --selector-kind category --selector antigravity-native --operation read',
-    ]
     const { menu } = await openPiMenu()
     const requested = await apply(menu, 'vault', 'request-access')
     expect(requested).toMatchObject({
@@ -341,7 +344,44 @@ describe('Pi /antigravity menu', () => {
       'The vault gives Pi no accounts, so requests are refused. There is no account rotation.',
       ...grant,
     ])
-    expect(section(payload, 'vault').lines.slice(-2)).toEqual(grant)
+    expect(section(payload, 'vault').lines.slice(-grant.length)).toEqual(grant)
+  }
+
+  const GRANT_COMMAND =
+    'ck auth grant --principal enrolled:antigravity-auth-pi --selector-kind category --selector antigravity-native --operation read'
+
+  it('names the missing read grant when the approved vault serves Pi no accounts', async () => {
+    // A vault that does not report grants leaves the cause unknown.
+    await expectEmptyRosterGuidance([
+      "The vault operator approved Pi, but Pi can't see any Antigravity accounts in the vault yet.",
+      `If the operator has not granted Pi read access yet, they run: ${GRANT_COMMAND}`,
+    ])
+  })
+
+  it('says no grant exists and gives the grant command when the vault reports zero grants', async () => {
+    rosterGrants = { grants: 0, grantTuples: [] }
+    await expectEmptyRosterGuidance([
+      'The vault operator approved Pi. The vault has not granted Pi read access.',
+      `The vault operator grants it with: ${GRANT_COMMAND}`,
+    ])
+  })
+
+  it('says the grant reaches no login and gives the reclassify and status commands when a grant exists', async () => {
+    rosterGrants = {
+      grants: 1,
+      grantTuples: [
+        {
+          selectorKind: 'category',
+          selector: 'antigravity-native',
+          operation: 'read',
+        },
+      ],
+    }
+    await expectEmptyRosterGuidance([
+      'The vault operator approved Pi. Pi has read access, but it reaches no Antigravity login in the vault.',
+      "The vault operator updates the vault's logins with: ck auth reclassify --from-registry",
+      'Then they check them with: ck auth status',
+    ])
   })
 
   it('selects vault custody while leaving Pi’s native login unchanged', async () => {

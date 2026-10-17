@@ -88,6 +88,7 @@ function harness(): Harness {
     accept: async (ref) => {
       h.events.push(`accept:${ref.routeId}:${ref.accountIdentity}`)
     },
+    grantReach: () => undefined,
   }
   h.options = {
     readMode: () => {

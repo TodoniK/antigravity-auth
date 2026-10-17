@@ -28,6 +28,7 @@ import {
   type CommonAuthCommandsModule,
   createAntigravityVaultAccountSource,
   type EnrollmentAuthority,
+  emptyVaultRosterCause,
   enrollmentAuthority,
   getAntigravityVaultEnrollmentName,
   loadCommonAuthClaustrum,
@@ -36,6 +37,9 @@ import {
   resolveClaustrumConnectionPath,
   sharedVaultTokenFolderOutcome,
   VAULT_ACCOUNT_REMEDY,
+  VAULT_RECLASSIFY_COMMAND,
+  VAULT_STATUS_COMMAND,
+  type VaultGrantReach,
   type VaultLogger,
   type VaultProviderStateFile,
   type VaultReporterSource,
@@ -376,8 +380,10 @@ export function createOpenCodeVaultCustody(
   /**
    * What an approved host does next. In vault mode, read the roster the
    * vault source last saved (no vault round trip while the menu opens): an
-   * empty one means the operator approved but has not granted read access.
-   * A missing or unreadable roster says nothing, since emptiness is unknown.
+   * empty one means the vault serves this host nothing. The grants named by
+   * the running source's latest discovery say why; without a running source
+   * they are unknown. A missing or unreadable roster says nothing, since
+   * emptiness is unknown.
    */
   const approvedNextSteps = async (
     mode: OpenCodeVaultStatus['mode'],
@@ -391,7 +397,9 @@ export function createOpenCodeVaultCustody(
       const roster = await (await loadClaustrum()).readVaultRoster(
         paths.rosterFile,
       )
-      return roster?.rows.length === 0 ? noVaultAccountsGuidance() : []
+      return roster?.rows.length === 0
+        ? noVaultAccountsGuidance(source?.grantReach())
+        : []
     } catch {
       return []
     }
@@ -707,12 +715,31 @@ function pendingExistsGuidance(): string[] {
   ]
 }
 
-/** Shown when this host is approved but the vault lists no Antigravity accounts for it. */
-function noVaultAccountsGuidance(): string[] {
-  return [
-    `Vault access is approved, but the vault serves ${OPENCODE_VAULT_ENROLLMENT_NAME} no Antigravity accounts.`,
-    `The vault operator grants read access with: ${OPENCODE_VAULT_GRANT_COMMAND}`,
-  ]
+/**
+ * Shown when this host is approved but the vault lists no Antigravity
+ * accounts for it. When the vault reported this host's grants, they tell the
+ * two causes apart: no grant at all, or a grant that matches no login. When
+ * the grants are unknown, the general message names the grant command.
+ */
+function noVaultAccountsGuidance(reach: VaultGrantReach | undefined): string[] {
+  switch (emptyVaultRosterCause(reach)) {
+    case 'no-grant':
+      return [
+        `Vault access is approved. The vault has not granted ${OPENCODE_VAULT_ENROLLMENT_NAME} read access.`,
+        `The vault operator grants it with: ${OPENCODE_VAULT_GRANT_COMMAND}`,
+      ]
+    case 'grant-reaches-nothing':
+      return [
+        `Vault access is approved. ${OPENCODE_VAULT_ENROLLMENT_NAME} has read access, but it reaches no Antigravity login in the vault.`,
+        `The vault operator updates the vault's logins with: ${VAULT_RECLASSIFY_COMMAND}`,
+        `Then they check them with: ${VAULT_STATUS_COMMAND}`,
+      ]
+    case 'unknown':
+      return [
+        `Vault access is approved, but the vault serves ${OPENCODE_VAULT_ENROLLMENT_NAME} no Antigravity accounts.`,
+        `The vault operator grants read access with: ${OPENCODE_VAULT_GRANT_COMMAND}`,
+      ]
+  }
 }
 
 /** The next steps for an enrollment state that needs the user or the operator to act. */

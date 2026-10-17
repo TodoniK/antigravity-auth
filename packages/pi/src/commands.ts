@@ -12,6 +12,7 @@ import {
   type CommonAuthCommandsModule,
   createAntigravityCommandMenu,
   loadCommonAuthCommands,
+  type VaultGrantReach,
 } from '@cortexkit/antigravity-auth-core'
 import type {
   ItemDefinition,
@@ -94,11 +95,18 @@ function servingAccount(
 async function custodyAccounts(
   status: PiVaultSetupStatus,
   options: PiAntigravityAccountSectionsOptions,
-): Promise<{ list: readonly PiVaultAccountChoice[]; problem?: string }> {
+): Promise<{
+  list: readonly PiVaultAccountChoice[]
+  reach?: VaultGrantReach
+  problem?: string
+}> {
   if (status.mode !== 'custody' || status.enrollment.state !== 'approved')
     return { list: [] }
   try {
-    return { list: await options.accounts().list() }
+    const port = options.accounts()
+    const list = await port.list()
+    const reach = port.grantReach()
+    return { list, ...(reach && { reach }) }
   } catch (error) {
     return {
       list: [],
@@ -143,7 +151,7 @@ export function createPiAntigravityAccountSections(
               localLoginLine(status),
             ],
           }
-        const { list, problem } = await custodyAccounts(status, options)
+        const { list, reach, problem } = await custodyAccounts(status, options)
         const serving = servingAccount(status, list)
         const items: ItemDefinition[] = list.map((account) => ({
           id: opaqueItemId(account.routeId),
@@ -168,7 +176,7 @@ export function createPiAntigravityAccountSections(
             ...(!problem &&
             list.length === 0 &&
             status.enrollment.state === 'approved'
-              ? piNoVaultAccountsGuidance()
+              ? piNoVaultAccountsGuidance(reach)
               : []),
           ],
           items,
@@ -199,7 +207,7 @@ export function createPiAntigravityAccountSections(
               "Every request uses Pi's own login. There is no account rotation.",
             ],
           }
-        const { list, problem } = await custodyAccounts(status, options)
+        const { list, reach, problem } = await custodyAccounts(status, options)
         const serving = servingAccount(status, list)
         if (
           !problem &&
@@ -209,7 +217,7 @@ export function createPiAntigravityAccountSections(
           return {
             lines: [
               'The vault gives Pi no accounts, so requests are refused. There is no account rotation.',
-              ...piNoVaultAccountsGuidance(),
+              ...piNoVaultAccountsGuidance(reach),
             ],
           }
         return {

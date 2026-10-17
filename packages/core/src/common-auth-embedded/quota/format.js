@@ -63,8 +63,12 @@ export function quotaWindowName(limit) {
 function clampPercent(remaining) {
     return Math.min(100, Math.max(0, remaining));
 }
+/** A remaining percentage as the whole number every form shows. */
+function wholePercent(remaining) {
+    return Math.round(clampPercent(remaining));
+}
 function percentLeft(remaining) {
-    return `${Math.round(clampPercent(remaining))}% left`;
+    return `${wholePercent(remaining)}% left`;
 }
 function resetDetails(resetsAt, checkedAt, now) {
     const at = resetsAt === undefined ? Number.NaN : Date.parse(resetsAt);
@@ -98,6 +102,16 @@ function displayOrder(left, right) {
  * and the optional age keep the shared formatter's wording.
  */
 export function quotaWindowParts(quota, options) {
+    const { windows, age } = scopedWindowParts(quota, options);
+    const parts = windows.map(({ part }) => part);
+    return age === undefined ? { windows: parts } : { windows: parts, age };
+}
+/**
+ * `quotaWindowParts` with each window's scope kept beside it. The narrow form
+ * needs the scope to name and pick model-scoped windows; the public parts do
+ * not carry it, so their shape stays as it was.
+ */
+function scopedWindowParts(quota, options) {
     if (!quota)
         return { windows: [] };
     const { now } = options;
@@ -107,12 +121,15 @@ export function quotaWindowParts(quota, options) {
     const windows = readings.map((limit) => {
         const remainingPercent = clampPercent(limit.remainingPercent ?? 0);
         return {
-            kind: 'window',
-            name: quotaWindowName(limit),
-            figure: percentLeft(limit.remainingPercent ?? 0),
-            remainingPercent,
-            checkedAt: limit.checkedAt,
-            ...resetDetails(limit.resetsAt, limit.checkedAt, now),
+            scope: limit.scope,
+            part: {
+                kind: 'window',
+                name: quotaWindowName(limit),
+                figure: percentLeft(limit.remainingPercent ?? 0),
+                remainingPercent,
+                checkedAt: limit.checkedAt,
+                ...resetDetails(limit.resetsAt, limit.checkedAt, now),
+            },
         };
     });
     const budget = quota.budget;
@@ -124,18 +141,22 @@ export function quotaWindowParts(quota, options) {
                 ? `credits ${percentLeft(remainingPercent)}`
                 : 'credits available';
         windows.push({
-            kind: 'budget',
-            name: 'credits',
-            figure,
-            ...(remainingPercent === undefined
-                ? {}
-                : { remainingPercent: clampPercent(remainingPercent) }),
-            checkedAt: budget.checkedAt,
-            ...resetDetails(budget.resetsAt, budget.checkedAt, now),
+            scope: ALL_SCOPE,
+            spent: budget.reached,
+            part: {
+                kind: 'budget',
+                name: 'credits',
+                figure,
+                ...(remainingPercent === undefined
+                    ? {}
+                    : { remainingPercent: clampPercent(remainingPercent) }),
+                checkedAt: budget.checkedAt,
+                ...resetDetails(budget.resetsAt, budget.checkedAt, now),
+            },
         });
     }
     if (windows.length > 0) {
-        const age = now - Math.min(...windows.map((part) => part.checkedAt));
+        const age = now - Math.min(...windows.map(({ part }) => part.checkedAt));
         if (age > (options.staleAfterMs ?? QUOTA_STALE_AFTER_MS)) {
             return { windows, age: `checked ${shortSpan(age)} ago` };
         }
@@ -143,13 +164,108 @@ export function quotaWindowParts(quota, options) {
     return { windows };
 }
 /**
+ * Whether the reading is stale: true exactly when the compact and full forms
+ * would end with `checked … ago`. The narrow form leaves that age out to stay
+ * short, so a caller drawing a narrow line uses this to dim it instead.
+ */
+export function isQuotaStale(quota, options) {
+    return scopedWindowParts(quota, options).age !== undefined;
+}
+/**
+ * The model a scope names, as a display name: any namespace before a colon
+ * is dropped (`model:claude-opus-4` → `claude-opus-4`) and the first letter is
+ * capitalized (`fable` → `Fable`); the rest stays as written.
+ */
+function scopeDisplayName(scope) {
+    const model = scope.slice(scope.indexOf(':') + 1);
+    return model.charAt(0).toUpperCase() + model.slice(1);
+}
+/**
+ * Short names for the model scopes in one row: the first two letters of each
+ * display name. Names that would read the same for different models are each
+ * extended one letter at a time until they differ (`Fable` and `Fabric` read
+ * `Fabl` and `Fabr`); a name that runs out of letters stays whole.
+ */
+function scopeAbbreviations(scopes) {
+    const names = [...new Set(scopes.map(scopeDisplayName))];
+    const lengths = new Map(names.map((name) => [name, 2]));
+    const short = (name) => name.slice(0, lengths.get(name));
+    for (;;) {
+        const byShort = new Map();
+        for (const name of names) {
+            byShort.set(short(name), [...(byShort.get(short(name)) ?? []), name]);
+        }
+        let extended = false;
+        for (const group of byShort.values()) {
+            if (group.length < 2)
+                continue;
+            for (const name of group) {
+                const length = lengths.get(name) ?? 2;
+                if (length < name.length) {
+                    lengths.set(name, length + 1);
+                    extended = true;
+                }
+            }
+        }
+        if (!extended)
+            break;
+    }
+    return new Map(scopes.map((scope) => [scope, short(scopeDisplayName(scope))]));
+}
+/**
+ * The narrow form's pieces: every account-wide window as `5h 92%`, then at
+ * most one more item, with ` left` added once to the last piece. That item is
+ * the tightest (least remaining) of the model-scoped windows and the credit
+ * budget, so the line stays bounded whatever the account carries: a scoped
+ * window reads under its short model name (`Fa 98%`), the budget as `cr 75%`
+ * (`cr 0%` when spent). On a tie a scoped window wins over the budget, and
+ * among scoped windows the first in display order wins. The choice depends
+ * only on the reading, never on a width. A budget without a percentage cannot
+ * be chosen; when nothing at all is shown it keeps its compact wording
+ * (`credits available`). No age is added; `isQuotaStale` says whether the
+ * reading is stale. A window whose reset arrived after the reading keeps its
+ * figure, as in the other forms.
+ */
+function narrowTextParts(quota, options) {
+    const { windows } = scopedWindowParts(quota, options);
+    const general = windows.filter(({ part, scope }) => part.kind === 'window' && scope === ALL_SCOPE);
+    const scoped = windows.filter(({ part, scope }) => part.kind === 'window' && scope !== ALL_SCOPE);
+    const abbreviations = scopeAbbreviations(scoped.map(({ scope }) => scope));
+    // The items competing for the one slot after the account-wide windows, in
+    // tie-break order: scoped windows in display order, then the budget. A
+    // spent budget counts as 0% left; one without a percentage cannot compete.
+    const budget = windows.find(({ part }) => part.kind === 'budget');
+    const budgetLeft = budget?.spent ? 0 : budget?.part.remainingPercent;
+    const extras = [
+        ...scoped.map(({ scope, part }) => ({
+            label: abbreviations.get(scope) ?? scope,
+            remaining: part.remainingPercent ?? 0,
+        })),
+        ...(budgetLeft === undefined
+            ? []
+            : [{ label: 'cr', remaining: budgetLeft }]),
+    ];
+    // Strictly lower wins, so on a tie the earlier item keeps the slot.
+    const tightest = extras.reduce((best, item) => best === undefined || item.remaining < best.remaining ? item : best, undefined);
+    const pieces = general.map(({ part }) => `${part.name} ${wholePercent(part.remainingPercent ?? 0)}%`);
+    if (tightest) {
+        pieces.push(`${tightest.label} ${wholePercent(tightest.remaining)}%`);
+    }
+    if (pieces.length === 0)
+        return windows.map(({ part }) => part.figure);
+    return pieces.map((piece, index) => index === pieces.length - 1 ? `${piece} left` : piece);
+}
+/**
  * The pieces of a quota text, in order: one per reported window
  * (`5h 58% left, resets 2h`), then the credit budget when there is one, then
  * `checked 3h ago` when the oldest piece shown is stale. Empty when nothing
  * was reported; `formatQuota` turns that into a sentence. A caller printing
- * one line per window (the terminal auth menu) uses these directly.
+ * one line per window (the terminal auth menu) uses these directly. In the
+ * narrow form the pieces are the narrow line's (`5h 92%`, `7d 66% left`).
  */
 export function quotaTextParts(quota, options) {
+    if (options.form === 'narrow')
+        return narrowTextParts(quota, options);
     const parts = quotaWindowParts(quota, options);
     const full = (options.form ?? 'full') === 'full';
     const text = parts.windows.map((part) => {
@@ -160,7 +276,8 @@ export function quotaTextParts(quota, options) {
 }
 /**
  * A row's quota as one line: `5h 58% left · 7d 90% left` in the compact
- * form, with `, resets 2h` after each window in the full form. With nothing
+ * form, with `, resets 2h` after each window in the full form, and
+ * `5h 58% · 7d 90% left` in the narrow form. With nothing
  * reported it is `NO_QUOTA_READING`, or `NO_LIMITS_REPORTED` when the
  * provider answered without a limit for any window.
  */

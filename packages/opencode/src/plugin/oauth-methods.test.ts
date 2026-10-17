@@ -448,9 +448,9 @@ describe('createOAuthMethods persistence failure handling', () => {
 
 const RELEASED_COMMON_AUTH = {
   package: '@cortexkit/common-auth',
-  version: '0.18.0',
+  version: '0.19.0',
   tarballSha256:
-    '932d944f1da27061e3d113ac9f8fa8ef41fc225a1c3dc825eedeaa9eced9cd02',
+    'dd32b53e849a7d98ed861a5f9d3d81645b31169350257ef1732f7827b8684885',
 } as const
 
 async function embeddedFilesBelow(

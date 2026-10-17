@@ -1,7 +1,7 @@
 import type { ClaustrumReporterSource } from '@cortexkit/claustrum-client';
 import type { QuotaObservation } from '../quota/index.js';
 import type { RoutingRow } from '../routing/index.js';
-import { type ClaustrumFamily, type ClaustrumScopedAttempt, type ClaustrumScopedClient, type IdentityParser } from './custody.js';
+import { type ClaustrumFamily, type ClaustrumScopedAttempt, type ClaustrumScopedClient, type IdentityParser, type VaultGrantReach } from './custody.js';
 import { type ClaustrumLogger } from './errors.js';
 import { type InsulaQuotaOptions } from './insula.js';
 import { type AccountMapper, type QuotaReceipt, type VaultRosterFile } from './roster.js';
@@ -71,6 +71,16 @@ export declare class ClaustrumConsumer<Q = QuotaObservation> {
     constructor(options: ClaustrumConsumerOptions<Q>);
     /** The last committed roster this instance saw, without any I/O. */
     snapshot(): VaultRosterFile | undefined;
+    /**
+     * What this consumer is granted, from its latest discovery, without any I/O.
+     * It explains an empty roster: `grants === 0` means no grant at all, while
+     * `grants > 0` means a grant that reaches no credential (`tuples` names its
+     * selector). Undefined means unknown, never zero: the vault or client is too
+     * old to send it, nothing was discovered yet, or the roster now in memory is
+     * a different view than the one this instance discovered (a peer process
+     * held the discovery lease and its newer roster was served instead).
+     */
+    grantReach(): VaultGrantReach | undefined;
     /** Rows for `/routing`, from the last committed roster. */
     routingRows(): RoutingRow[];
     refresh(): Promise<VaultRosterFile | undefined>;

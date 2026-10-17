@@ -3,6 +3,16 @@ import { writeEnrollmentTokenFile } from '@cortexkit/claustrum-client';
 import { printLine } from '../auth-menu/terminal.js';
 import { ClaustrumEnrollmentManager, connectClaustrumEnrollmentClient, hostEnrollmentPaths, } from '../claustrum/enrollment.js';
 import { ProcessFenceViolationError, ProcessInspectionError, } from './process-fence.js';
+const ENROLLMENT_INCOMPLETE_MESSAGE = 'Claustrum enrollment did not complete. Inspect and approve with ck, then rerun setup.';
+/**
+ * Thrown when the enrollment ended without writing the host's token: the vault
+ * could not be reached, it refused the request, or approval never came before
+ * setup stopped waiting. Setup can then report the host as not connected
+ * without reading its files. The message is the same one a plain error would
+ * carry, so the user sees no difference.
+ */
+export class HostNotEnrolledError extends Error {
+}
 /** Enroll an independently revocable host; plugin callbacks choose its credential store and account permissions. */
 export async function connectSetupHost(plugin, host, io, terminal, fence) {
     const { name, paths: input } = plugin.vault.hosts[host];
@@ -12,7 +22,7 @@ export async function connectSetupHost(plugin, host, io, terminal, fence) {
         connectionFile: plugin.vault.connectionFile,
         handshakeTimeoutMs: 2000,
     }).catch(() => {
-        throw new Error('Claustrum connection failed; start ck and rerun setup.');
+        throw new HostNotEnrolledError('Claustrum connection failed; start ck and rerun setup.');
     });
     try {
         const manager = new ClaustrumEnrollmentManager({
@@ -42,12 +52,12 @@ export async function connectSetupHost(plugin, host, io, terminal, fence) {
                 return;
             }
             if (status.state !== 'pending' && status.state !== 'busy')
-                throw new Error('Claustrum enrollment refused; inspect its status with ck before rerunning setup.');
+                throw new HostNotEnrolledError('Claustrum enrollment refused; inspect its status with ck before rerunning setup.');
             if (status.state === 'pending' &&
                 status.requestId &&
                 status.requestId !== printedRequest) {
                 if (!/^[a-zA-Z0-9_-]+$/.test(status.requestId))
-                    throw new Error('Invalid enrollment request id.');
+                    throw new HostNotEnrolledError('Invalid enrollment request id.');
                 printedRequest = status.requestId;
                 printLine(terminal, 'Waiting for approval. In another terminal, run:');
                 printLine(terminal, `  ck auth enroll approve --request-id ${status.requestId} --name ${name}`);
@@ -55,14 +65,16 @@ export async function connectSetupHost(plugin, host, io, terminal, fence) {
             }
             await (io.wait ?? delay)(1000);
         }
-        throw new Error('Claustrum approval is still pending; approve with ck and rerun setup.');
+        throw new HostNotEnrolledError('Claustrum approval is still pending; approve with ck and rerun setup.');
     }
     catch (error) {
         if (error instanceof ProcessFenceViolationError ||
             error instanceof ProcessInspectionError)
             throw error;
         // Enrollment exceptions can carry request secrets or bearer tokens; never display them.
-        throw new Error('Claustrum enrollment did not complete. Inspect and approve with ck, then rerun setup.');
+        if (error instanceof HostNotEnrolledError)
+            throw new HostNotEnrolledError(ENROLLMENT_INCOMPLETE_MESSAGE);
+        throw new Error(ENROLLMENT_INCOMPLETE_MESSAGE);
     }
     finally {
         client.close();

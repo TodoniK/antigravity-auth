@@ -372,6 +372,7 @@
       "node:path"
     ],
     "rpc/server-registry.d.ts": ["./rpc-server.js"],
+    "setup/command-error.d.ts": ["./types.js"],
     "setup/command-error.js": ["../logger/redact.js", "./command-runner.js"],
     "setup/command-runner.js": ["node:child_process"],
     "setup/command.d.ts": ["./types.js"],
@@ -379,6 +380,7 @@
       "../auth-menu/select.js",
       "../auth-menu/terminal.js",
       "../claustrum/enrollment.js",
+      "./command-error.js",
       "./command-runner.js",
       "./detect.js",
       "./enroll.js",

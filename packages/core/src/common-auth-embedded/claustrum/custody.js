@@ -84,6 +84,21 @@ function credentialTypeOf(row, family) {
     return undefined;
 }
 /**
+ * The grants named in the vault's list reply, or undefined when it names none.
+ * Both fields must be present: a reply carrying only one of them is treated as
+ * unknown rather than completed with a guess. claustrum-client already refuses
+ * a malformed value, so nothing here validates it again.
+ */
+function grantReachOf(listed) {
+    const { grants, grantTuples } = listed;
+    if (grants === undefined || grantTuples === undefined)
+        return undefined;
+    return Object.freeze({
+        grants,
+        tuples: Object.freeze(grantTuples.map(({ selectorKind, selector, operation }) => Object.freeze({ selectorKind, selector, operation }))),
+    });
+}
+/**
  * Reads this consumer's vault credentials (list, fetch, 401 report), with the
  * enrollment token as authorization. Used by every host of a plugin. There is
  * deliberately no credential cache and no single-flight of credential reads:
@@ -217,10 +232,12 @@ export class ClaustrumScopedCustody {
         }
         for (const record of skipped)
             this.#logger.warn('skipped malformed vault record', record);
+        const grantReach = grantReachOf(inventory);
         return {
             view: inventory.view,
             credentials: Object.freeze(credentials),
             skipped: Object.freeze(skipped),
+            ...(grantReach && { grantReach }),
         };
     }
     /**

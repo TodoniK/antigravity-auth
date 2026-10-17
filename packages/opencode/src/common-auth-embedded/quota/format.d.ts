@@ -11,8 +11,11 @@ export declare const NO_LIMITS_REPORTED = "no limits reported";
 /**
  * `compact` fits a footer or a sidebar row: each window's figure, the credit
  * budget and the stale marker, without reset times. `full` adds each reset.
+ * `narrow` fits one line per account in a narrow sidebar: `5h 92% · 7d 66%
+ * · Fa 98% left`, the account-wide windows plus at most one model-scoped
+ * window or the budget (as `cr`), and no stale marker (see `isQuotaStale`).
  */
-export type QuotaTextForm = 'compact' | 'full';
+export type QuotaTextForm = 'compact' | 'full' | 'narrow';
 export interface QuotaTextOptions {
     /** The current time in ms, for reset countdowns and the stale marker. */
     now: number;
@@ -56,16 +59,24 @@ export declare function quotaWindowName(limit: Pick<ProjectedLimit, 'scope' | 'l
  */
 export declare function quotaWindowParts(quota: ProjectedQuota | undefined, options: QuotaTextOptions): QuotaParts;
 /**
+ * Whether the reading is stale: true exactly when the compact and full forms
+ * would end with `checked … ago`. The narrow form leaves that age out to stay
+ * short, so a caller drawing a narrow line uses this to dim it instead.
+ */
+export declare function isQuotaStale(quota: ProjectedQuota | undefined, options: QuotaTextOptions): boolean;
+/**
  * The pieces of a quota text, in order: one per reported window
  * (`5h 58% left, resets 2h`), then the credit budget when there is one, then
  * `checked 3h ago` when the oldest piece shown is stale. Empty when nothing
  * was reported; `formatQuota` turns that into a sentence. A caller printing
- * one line per window (the terminal auth menu) uses these directly.
+ * one line per window (the terminal auth menu) uses these directly. In the
+ * narrow form the pieces are the narrow line's (`5h 92%`, `7d 66% left`).
  */
 export declare function quotaTextParts(quota: ProjectedQuota | undefined, options: QuotaTextOptions): string[];
 /**
  * A row's quota as one line: `5h 58% left · 7d 90% left` in the compact
- * form, with `, resets 2h` after each window in the full form. With nothing
+ * form, with `, resets 2h` after each window in the full form, and
+ * `5h 58% · 7d 90% left` in the narrow form. With nothing
  * reported it is `NO_QUOTA_READING`, or `NO_LIMITS_REPORTED` when the
  * provider answered without a limit for any window.
  */

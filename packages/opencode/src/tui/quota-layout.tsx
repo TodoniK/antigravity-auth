@@ -194,7 +194,8 @@ interface WindowRowLayout {
 
 // Column widths for one `<name> <bar> <figure> <reset>` row within `width`
 // cells. The bar shrinks first, down to MIN_BAR_WIDTH; then the reset column
-// is dropped; then the bar.
+// is dropped; when even that leaves less than MIN_BAR_WIDTH cells for the
+// bar, the bar is left out and the row is just the name and figure.
 function windowRowLayout(
   width: number,
   named: boolean,

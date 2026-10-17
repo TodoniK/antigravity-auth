@@ -234,7 +234,8 @@ function toneColor(theme: Theme, tone: Tone): ThemeColor {
 }
 
 // The shared quota layout reads its colors through this palette. Muted text
-// and the label use the theme fields directly, as the sidebar always has.
+// and the account label read `textMuted` and `text` straight from the theme,
+// without the `toneColor` fallback chain.
 function themePalette(theme: () => Theme): QuotaPalette {
   return {
     text: () => theme().text,
@@ -471,9 +472,9 @@ function CollapsedRow(props: {
   )
 }
 
-// Fleet AccountBlock, adapted to Antigravity's per-account data: the shared
-// quota block with the OpenCode 1 status word. Status word priorities (first
-// match wins):
+// One account in the Quota section: the shared quota block, with the status
+// word computed from the sidebar file's account state. Status word priorities
+// (first match wins):
 //   - `off` when the account is disabled
 //   - `cooling <wait>` when cooldownUntil is still in the future
 //   - `active` when current === true

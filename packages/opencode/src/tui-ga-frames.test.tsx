@@ -134,8 +134,9 @@ function staleAccount(): Account {
   )
 }
 
-// An account served from the vault: never the local current account, and
-// an older pool stored without per-window readings next to a windowed one.
+// An account served from the vault, so never the local current account. Its
+// Gemini pool has per-window readings; its other pool was stored in the older
+// single-reading form, without windows.
 function vaultAccount(): Account {
   const checkedAt = NOW - 3 * HOUR
   return account(
@@ -302,7 +303,8 @@ function expectPlainGroupNames(frame: string): void {
 
 describe('OpenCode 2 sidebar quota layout', () => {
   it('draws bars with the OpenCode 1 default appearance', () => {
-    // The GA sidebar has no preferences file, so it uses this copy.
+    // The GA sidebar has no preferences file, so it draws with a copy of the
+    // OpenCode 1 default appearance; the copy must not drift.
     expect(DEFAULT_QUOTA_APPEARANCE).toEqual(DEFAULT_PREFS.appearance)
   })
   for (const width of WIDTHS) {

@@ -298,6 +298,10 @@ OpenCode 2 uses location-scoped snapshots and native host RPC, not OpenCode 1 po
 
 Raw generative Antigravity sends use [agy-transport.ts](../../core/src/agy-transport.ts): separate default `180_000` ms response-header and no-body-data idle timeouts, **not** a total streaming deadline. Standard-fetch callers use [fetchWithActiveTimeout](../../core/src/fetch-timeout.ts), default `15_000` ms until headers; cancellation stays connected through body completion/error/cancel. That helper's 15s budget is not the raw Antigravity limit.
 
+Each logical generation request also has a **fixed, provisional 10-minute pre-response limit**, pending real latency measurements. This is not a setting. It covers preparation, account selection and quota waits, warmups, endpoint/account retries, and failed-response classification until the accepted main response's headers arrive. An empty-response resend retains the original deadline. It does **not** promise a first visible token within ten minutes or limit the total duration of an accepted response body. The per-attempt 180-second header allowance is unchanged; body-idle limits remain 180 seconds in OpenCode 1/Pi and 300 seconds in GA.
+
+The pre-response limit is independent of `max_rate_limit_wait_seconds`: the earlier active limit wins, with the existing quota refusal winning a tie. Setting the quota-wait option to `0` removes only that quota-wait cap, not the fixed pre-response limit. Expiry returns a native, nonretryable HTTP 412 (`FAILED_PRECONDITION`); Pi emits its native terminal error instead of assistant text. If the caller cancels a request, its cancellation outcome is preserved instead of being converted to a timeout refusal.
+
 ## Security and redaction
 
 Keep local store generations, pointers, backups, transfer files, native Google auth slots, and vault custody files private. Filesystem permissions are not encryption. None belong in Git or support reports.

@@ -17,6 +17,64 @@
 # catalogued here; .github/workflows/windows-migration.yml remains its platform gate.
 
 [[control]]
+id = "shared-pre-response-no-selection-reset"
+guards = "The absolute pre-response deadline survives endpoint fallback and revisits to an already selected account."
+file = "packages/opencode/src/plugin/shared/request-services.ts"
+old = "      previousAccountIndex = account.index"
+new = "      previousAccountIndex = account.index; Object.assign(deadline, { expiresAt: (deps.preResponseClock?.now() ?? performance.now()) + PRE_RESPONSE_DEADLINE_MS }) // NON-VACUITY BREAK: replenish on selection."
+test_file = "packages/opencode/src/plugin/shared/request-services.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . packages/opencode/src/plugin/shared/request-services.test.ts -t \"$1|^createRequestExecutor pre-response deadline Request signal and init override are extracted before the first await$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/shared/request-services.test.ts -t \"$1|^createRequestExecutor pre-response deadline Request signal and init override are extracted before the first await$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^createRequestExecutor\spre-response\sdeadline\spre-response\sdeadline\sis\sshared\sacross\sdaily\sprod\sand\saccount\srevisits$']
+
+[[control]]
+id = "shared-pre-response-warmup-rethrow"
+guards = "Thinking warmup must not swallow a tagged pre-response expiry and dispatch the main request."
+file = "packages/opencode/src/plugin/shared/request-services.ts"
+old = '''          warmupState.clearWarmupAttempt(prepared.sessionId)
+          if (error instanceof PreResponseTimeoutError) throw error'''
+new = '''          warmupState.clearWarmupAttempt(prepared.sessionId)
+          // NON-VACUITY BREAK: swallow the tagged warmup expiry.'''
+test_file = "packages/opencode/src/plugin/shared/request-services.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . packages/opencode/src/plugin/shared/request-services.test.ts -t \"$1|^createRequestExecutor pre-response deadline Request signal and init override are extracted before the first await$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/shared/request-services.test.ts -t \"$1|^createRequestExecutor pre-response deadline Request signal and init override are extracted before the first await$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^createRequestExecutor\spre-response\sdeadline\sthinking\swarmup\srethrows\sa\stagged\sdeadline\swithout\ssending\sthe\smain\srequest$']
+
+[[control]]
+id = "shared-pre-response-ga-send-abort"
+guards = "The GA send override forwards the deadline abort to the real raw TLS socket and returns a native loopback refusal."
+file = "packages/opencode/src/plugin/ga-location-services.ts"
+old = '''                  endpoint: new URL(url).origin,
+                  signal,
+                  kind: job.kind,'''
+new = '''                  endpoint: new URL(url).origin,
+                  signal: new AbortController().signal, // NON-VACUITY BREAK: detach the physical send.
+                  kind: job.kind,'''
+test_file = "packages/opencode/src/plugin/shared/request-services.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . packages/opencode/src/plugin/shared/request-services.test.ts -t \"$1|^createRequestExecutor pre-response deadline Request signal and init override are extracted before the first await$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/shared/request-services.test.ts -t \"$1|^createRequestExecutor pre-response deadline Request signal and init override are extracted before the first await$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^createRequestExecutor\spre-response\sdeadline\sGA\sbridge\spropagates\stimeout\spolicy\sand\spreserves\sfive\sminute\sidle$']
+
+[[control]]
+id = "shared-pre-response-accepted-headers-disarm"
+guards = "Accepted main headers disarm the pre-response timer before a nonstream or streaming body may outlive the absolute deadline."
+file = "packages/opencode/src/plugin/shared/request-services.ts"
+old = "            if (response.ok) deadline.acceptHeaders()"
+new = "            if (false) deadline.acceptHeaders() // NON-VACUITY BREAK: leave the deadline armed over the body."
+test_file = "packages/opencode/src/plugin/shared/request-services.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . packages/opencode/src/plugin/shared/request-services.test.ts -t \"$1|^createRequestExecutor pre-response deadline Request signal and init override are extracted before the first await$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/shared/request-services.test.ts -t \"$1|^createRequestExecutor pre-response deadline Request signal and init override are extracted before the first await$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^createRequestExecutor\spre-response\sdeadline\ssuccessful\sheaders\sdisarm\sonly\sthe\spre-response\stimer$']
+
+[[control]]
 id = "shared-cumulative-no-account-wait-budget"
 guards = "Repeated individually short all-account waits consume one cumulative budget and stop with a native refusal before any upstream send."
 file = "packages/opencode/src/plugin/shared/request-services.ts"

@@ -529,6 +529,161 @@ async function collectStream(
   return { events, result: await eventStream.result() }
 }
 
+describe('Pi pre-response deadline', () => {
+  function clock() {
+    let now = 0
+    const callbacks = new Map<() => void, number>()
+    return {
+      now: () => now,
+      schedule(callback: () => void, delay: number) {
+        callbacks.set(callback, now + delay)
+        return () => {
+          callbacks.delete(callback)
+        }
+      },
+      advance(ms: number) {
+        now += ms
+        for (const [callback, at] of [...callbacks])
+          if (at <= now && callbacks.delete(callback)) callback()
+      },
+      pending: () => callbacks.size,
+    }
+  }
+
+  for (const mode of [
+    'local',
+    'vault',
+    'vault-admission',
+    'project',
+  ] as const) {
+    it(`Pi silent headers emit one native terminal error without text (${mode})`, async () => {
+      const time = clock()
+      const stall = async () => {
+        time.advance(actualCore.PRE_RESPONSE_DEADLINE_MS)
+        return new Promise<never>(() => {})
+      }
+      fetchWithAgyCliTransportMock.mockImplementation(stall)
+      if (mode === 'project')
+        ensureProjectContextMock.mockImplementationOnce(stall)
+      const stream = mode.startsWith('vault')
+        ? createCortexKitAntigravityVaultStream(
+            async (dispatch, signal) => {
+              if (mode === 'vault-admission') return stall()
+              return dispatch(
+                { accessToken: 'vault-token', projectId: 'vault-project' },
+                signal,
+              )
+            },
+            'marker',
+            time,
+          )(fakeModel(), userContext(), { apiKey: 'marker' })
+        : streamCortexKitAntigravity(
+            fakeModel(),
+            userContext(),
+            { apiKey: 'test-token' },
+            undefined,
+            time,
+          )
+      const { events, result } = await collectStream(stream)
+      expect(events.filter((event) => event.type === 'error')).toHaveLength(1)
+      expect(
+        events.some(
+          (event) => event.type === 'text_delta' || event.type === 'done',
+        ),
+      ).toBe(false)
+      expect(result.content).toEqual([])
+      expect(result.stopReason).toBe('error')
+      expect(result.errorMessage).toBe(actualCore.PRE_RESPONSE_TIMEOUT_MESSAGE)
+      expect(fetchWithAgyCliTransportMock).toHaveBeenCalledTimes(
+        mode === 'project' || mode === 'vault-admission' ? 0 : 1,
+      )
+      expect(time.pending()).toBe(0)
+    })
+  }
+
+  it('the permitted changed-version 401 resend shares the original deadline', async () => {
+    const time = clock()
+    fetchWithAgyCliTransportMock.mockImplementation(async () => {
+      time.advance(actualCore.PRE_RESPONSE_DEADLINE_MS / 2)
+      return new Response('unauthorized', { status: 401 })
+    })
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), 'pi-deadline-vault-')),
+    )
+    const tokenPath = join(root, 'enrollment-token.json')
+    await writeFile(
+      tokenPath,
+      JSON.stringify({ token: 'ab'.repeat(32), token_generation: 1 }),
+      { mode: 0o600 },
+    )
+    let admissions = 0
+    const vault = actualCore.createAntigravityVaultAccountSource({
+      claustrum: await actualCore.loadCommonAuthClaustrum(),
+      host: 'pi',
+      rosterPath: join(root, 'roster.json'),
+      tokenPath,
+      isCustodyActive: () => true,
+      reporterSource: 'direct',
+      logger: { warn() {}, debug() {} },
+      connect: async () => ({
+        listScoped: async () => ({
+          view: 'synthetic-vault-view',
+          rows: [
+            {
+              id: 'cred-deadline',
+              categories: ['antigravity-native'],
+              credentialType: 'oauth' as const,
+              serves: [],
+              providerIds: [],
+              refreshAdapter: 'antigravity',
+              state: 'active' as const,
+              recordVersion: 1,
+              operations: ['read'],
+              createdAtMs: null,
+              accountId: 'same-account',
+            },
+          ],
+          grants: undefined,
+          grantTuples: undefined,
+        }),
+        getScoped: async () => ({
+          material: `version-${++admissions}`,
+          recordVersion: admissions,
+          expiresAtMs: Date.now() + 3_600_000,
+          credentialId: 'cred-deadline',
+          projectId: 'same-project',
+          accountId: 'same-account',
+        }),
+        reportAuthFailureScoped: async () => {},
+        close() {},
+      }),
+    })
+    try {
+      const { createPiVaultSend } = await import('./vault-source.ts')
+      const send = createPiVaultSend({
+        readMode: () => ({ ok: true, record: { version: 1, mode: 'custody' } }),
+        source: async () => vault,
+      })
+      const { events, result } = await collectStream(
+        createCortexKitAntigravityVaultStream(send, 'marker', time)(
+          fakeModel(),
+          userContext(),
+          { apiKey: 'marker' },
+        ),
+      )
+      expect(fetchWithAgyCliTransportMock).toHaveBeenCalledTimes(2)
+      expect(admissions).toBe(2)
+      expect(result.errorMessage).toBe(actualCore.PRE_RESPONSE_TIMEOUT_MESSAGE)
+      expect(events.filter((event) => event.type === 'error')).toHaveLength(1)
+      expect(result.content).toEqual([])
+      expect(time.pending()).toBe(0)
+    } finally {
+      vault.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
 afterEach(() => {
   fetchWithAgyCliTransportMock.mockReset()
   ensureProjectContextMock.mockClear()
@@ -1301,20 +1456,13 @@ describe('Pi caller cancellation without AbortSignal.any', () => {
     })
   }
 
-  it('forwards a pre-abort through opening without attaching a caller listener', async () => {
+  it('refuses a pre-abort before opening without attaching a caller listener', async () => {
     const caller = new AbortController()
     const listeners = observeCallerListeners(caller.signal)
     const reason = new Error('pre-aborted Pi request')
     caller.abort(reason)
-    fetchWithAgyCliTransportMock.mockImplementationOnce(
-      async (_url, _init, options) => {
-        expect(options.signal.aborted).toBe(true)
-        expect(options.signal.reason).toBe(reason)
-        throw options.signal.reason
-      },
-    )
     const { result } = await collectStream(startWithCaller(caller))
-    expect(fetchWithAgyCliTransportMock).toHaveBeenCalledTimes(1)
+    expect(fetchWithAgyCliTransportMock).not.toHaveBeenCalled()
     expect(result.stopReason).toBe('aborted')
     expect(result.errorMessage).toBe(reason.message)
     expect(listeners.size).toBe(0)

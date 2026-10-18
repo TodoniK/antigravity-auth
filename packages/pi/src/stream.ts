@@ -11,6 +11,8 @@ import {
   isGeminiArgonModel,
   isRetiredAgyModel,
   orderAgyRequestPayloadInPlace,
+  type PreResponseClock,
+  PreResponseDeadline,
   RETIRED_AGY_MODEL_MESSAGE,
   redactCredentialError,
   redactCredentialText,
@@ -463,6 +465,7 @@ async function sendAntigravityRequest(options: {
   sessionKey: string
   signal?: AbortSignal
   assertAdmission?: () => Promise<void>
+  deadline: PreResponseDeadline
 }): Promise<Response> {
   if (isRetiredAgyModel(options.model.id)) {
     throw new Error(RETIRED_AGY_MODEL_MESSAGE)
@@ -471,15 +474,17 @@ async function sendAntigravityRequest(options: {
   // `refreshToken|projectId|managedProjectId` saved at getApiKey supplies
   // the managed project without a loadCodeAssist call per turn.
   const packedRefresh = getPackedRefresh(options.accessToken) ?? ''
-  const projectContext = await ensureProjectContext({
-    type: 'oauth',
-    refresh: packedRefresh,
-    access: options.accessToken,
-    expires: Date.now() + 60_000,
-  })
+  const projectContext = await options.deadline.wait(() =>
+    ensureProjectContext({
+      type: 'oauth',
+      refresh: packedRefresh,
+      access: options.accessToken,
+      expires: Date.now() + 60_000,
+    }),
+  )
 
   const prepared = prepareAntigravityRequest(options)
-  await options.assertAdmission?.()
+  await options.deadline.wait(() => options.assertAdmission?.())
   return dispatchAntigravityRequest(
     prepared,
     {
@@ -508,6 +513,7 @@ type OpenAntigravityResponse = (
   sessionKey: string,
   signal: AbortSignal,
   selectedCredentials: Set<string>,
+  deadline: PreResponseDeadline,
 ) => Promise<Response>
 
 export function streamCortexKitAntigravity(
@@ -515,13 +521,14 @@ export function streamCortexKitAntigravity(
   context: Context,
   options?: SimpleStreamOptions,
   assertAdmission?: () => Promise<void>,
+  preResponseClock?: PreResponseClock,
 ): AssistantMessageEventStream {
   return runAntigravityStream(
     model,
     context,
     options,
-    async (sessionKey, signal) => {
-      await assertAdmission?.()
+    async (sessionKey, signal, _selectedCredentials, deadline) => {
+      await deadline.wait(() => assertAdmission?.())
       const accessToken = options?.apiKey ?? ''
       if (!accessToken)
         throw new Error('Missing Antigravity OAuth access token')
@@ -533,8 +540,10 @@ export function streamCortexKitAntigravity(
         sessionKey,
         signal,
         assertAdmission,
+        deadline,
       })
     },
+    preResponseClock,
   )
 }
 
@@ -547,6 +556,7 @@ export function streamCortexKitAntigravity(
 export function createCortexKitAntigravityVaultStream(
   send: AntigravityVaultSend,
   placeholderKey: string,
+  preResponseClock?: PreResponseClock,
 ) {
   return (
     model: Model<Api>,
@@ -557,7 +567,7 @@ export function createCortexKitAntigravityVaultStream(
       model,
       context,
       options,
-      (sessionKey, signal, selectedCredentials) => {
+      (sessionKey, signal, selectedCredentials, deadline) => {
         if (options?.apiKey !== placeholderKey)
           throw new Error(
             'The native Google credential slot is not synchronized for vault mode. No request was sent.',
@@ -568,19 +578,21 @@ export function createCortexKitAntigravityVaultStream(
           streamOptions: options,
           sessionKey,
         })
-        return send(async (credential, sendSignal) => {
-          selectedCredentials.add(credential.accessToken)
-          try {
-            return await dispatchAntigravityRequest(
-              prepared,
-              credential,
-              sendSignal ?? signal,
-            )
-          } catch (error) {
-            throw redactCredentialError(error, [...selectedCredentials])
-          }
-        }, signal)
+        return deadline.open(() =>
+          send(async (credential, sendSignal) => {
+            selectedCredentials.add(credential.accessToken)
+            try {
+              deadline.follow(sendSignal)
+              return await deadline.open(() =>
+                dispatchAntigravityRequest(prepared, credential, signal),
+              )
+            } catch (error) {
+              throw redactCredentialError(error, [...selectedCredentials])
+            }
+          }, signal),
+        )
       },
+      preResponseClock,
     )
 }
 
@@ -589,8 +601,10 @@ function runAntigravityStream(
   context: Context,
   options: SimpleStreamOptions | undefined,
   open: OpenAntigravityResponse,
+  preResponseClock?: PreResponseClock,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream()
+  const deadline = new PreResponseDeadline(options?.signal, preResponseClock)
 
   void (async () => {
     const output = createOutput(model)
@@ -605,17 +619,17 @@ function runAntigravityStream(
 
     try {
       const sessionKey = getRequestSessionKey(context, options)
-      requestAbort = new AbortController()
-      detachCaller = forwardAbort(options?.signal, requestAbort)
-      response = await open(
-        sessionKey,
-        requestAbort.signal,
-        selectedCredentials,
+      const openingAbort = new AbortController()
+      requestAbort = openingAbort
+      detachCaller = forwardAbort(deadline.signal, openingAbort)
+      response = await deadline.open(() =>
+        open(sessionKey, openingAbort.signal, selectedCredentials, deadline),
       )
+      if (response.ok) deadline.acceptHeaders()
 
       if (!response.ok) {
         throw new Error(
-          `Antigravity request failed: HTTP ${response.status} ${await response.text()}`,
+          `Antigravity request failed: HTTP ${response.status} ${await deadline.wait(() => response!.text())}`,
         )
       }
 
@@ -841,6 +855,7 @@ function runAntigravityStream(
       stream.push({ type: 'error', reason: output.stopReason, error: output })
       stream.end()
     } finally {
+      deadline.dispose()
       detachCaller()
     }
   })()

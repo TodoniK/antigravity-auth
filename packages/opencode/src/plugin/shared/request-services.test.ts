@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 import { getEventListeners } from 'node:events'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import * as net from 'node:net'
 import { join } from 'node:path'
+import * as tls from 'node:tls'
 import {
   type AccountStorageStore,
   type AccountStorageV4,
@@ -9,13 +11,21 @@ import {
   ANTIGRAVITY_ENDPOINT_FALLBACKS,
   AccountManager as CoreAccountManager,
   type EnrollmentAuthority,
+  fetchWithAgyCliTransport,
   HealthScoreTracker,
   type ManagedAccount,
   type OAuthAuthDetails,
+  PRE_RESPONSE_DEADLINE_MS,
+  PRE_RESPONSE_TIMEOUT_MESSAGE,
+  PreResponseTimeoutError,
   SKIP_THOUGHT_SIGNATURE,
   TokenBucketTracker,
 } from '@cortexkit/antigravity-auth-core'
-import { startGaLoopbackBridge } from '../../ga/server/index'
+import {
+  createGaRawSender,
+  GA_RAW_IDLE_TIMEOUT_MS,
+  startGaLoopbackBridge,
+} from '../../ga/server/index'
 import { extractAccountAccessErrorDetails } from '../account-access'
 import { createAuthLoader } from '../auth-loader'
 import { DEFAULT_CONFIG } from '../config'
@@ -624,6 +634,724 @@ const NON_STREAM_URL = modelUrl('gemini-3-flash', 'generateContent')
 const STREAM_URL = modelUrl('gemini-3-flash')
 const CLAUDE_URL = modelUrl('claude-sonnet-5-5-low', 'generateContent')
 
+function deadlineClock() {
+  let now = 0
+  const timers = new Map<() => void, number>()
+  return {
+    now: () => now,
+    schedule(callback: () => void, delay: number) {
+      timers.set(callback, now + delay)
+      return () => {
+        timers.delete(callback)
+      }
+    },
+    advance(delay: number) {
+      now += delay
+      for (const [callback, at] of [...timers]) {
+        if (at <= now && timers.delete(callback)) callback()
+      }
+    },
+    pending: () => timers.size,
+  }
+}
+
+let loopbackIdentity: { key: Buffer; cert: Buffer } | undefined
+const nativeTls = { ...tls }
+
+async function silentPeer(phase: 'origin' | 'tls' | 'connect' | 'proxy-tls') {
+  if (!loopbackIdentity) {
+    const root = join(testRoot(), 'loopback-tls')
+    mkdirSync(root, { recursive: true })
+    const key = join(root, 'key.pem')
+    const cert = join(root, 'cert.pem')
+    const generated = Bun.spawnSync([
+      'openssl',
+      'req',
+      '-x509',
+      '-newkey',
+      'rsa:2048',
+      '-nodes',
+      '-keyout',
+      key,
+      '-out',
+      cert,
+      '-days',
+      '1',
+      '-subj',
+      '/CN=localhost',
+      '-addext',
+      'subjectAltName=DNS:localhost,IP:127.0.0.1',
+    ])
+    if (generated.exitCode !== 0) throw new Error(generated.stderr.toString())
+    loopbackIdentity = { key: readFileSync(key), cert: readFileSync(cert) }
+  }
+  mock.module('node:tls', () => ({
+    ...nativeTls,
+    connect: (options: tls.ConnectionOptions) =>
+      nativeTls.connect({
+        ...options,
+        ca: loopbackIdentity!.cert,
+        servername: 'localhost',
+      }),
+  }))
+  const keys = [
+    'HTTPS_PROXY',
+    'https_proxy',
+    'ALL_PROXY',
+    'all_proxy',
+    'NO_PROXY',
+    'no_proxy',
+  ]
+  const saved = keys.map((key) => [key, process.env[key]] as const)
+  for (const key of keys) delete process.env[key]
+  let reached!: () => void
+  let closed!: () => void
+  const received = new Promise<void>((resolve) => {
+    reached = resolve
+  })
+  const peerClosed = new Promise<void>((resolve) => {
+    closed = resolve
+  })
+  const sockets = new Set<net.Socket>()
+  const track = (socket: net.Socket) => {
+    sockets.add(socket)
+    socket.on('error', () => {})
+    socket.once('close', () => {
+      sockets.delete(socket)
+      closed()
+    })
+  }
+  const server =
+    phase === 'origin'
+      ? tls.createServer(loopbackIdentity, (socket) => {
+          track(socket)
+          let request = ''
+          socket.on('data', (data) => {
+            request += data.toString()
+            if (request.includes('\r\n\r\n')) reached()
+          })
+        })
+      : net.createServer((socket) => {
+          track(socket)
+          let connected = false
+          socket.on('data', (data) => {
+            if (phase === 'tls') {
+              expect(data[0]).toBe(22)
+              reached()
+              return
+            }
+            if (!connected) {
+              expect(data.toString()).toStartWith('CONNECT ')
+              connected = true
+              if (phase === 'connect') reached()
+              else socket.write('HTTP/1.1 200 Connection established\r\n\r\n')
+            } else {
+              expect(data[0]).toBe(22)
+              reached()
+            }
+          })
+        })
+  server.on('connection', track)
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string')
+    throw new Error('loopback listener missing')
+  const endpoint = `https://127.0.0.1:${address.port}`
+  if (phase === 'connect' || phase === 'proxy-tls')
+    process.env.HTTPS_PROXY = `http://127.0.0.1:${address.port}`
+  else process.env.NO_PROXY = '*'
+  return {
+    endpoint:
+      phase === 'connect' || phase === 'proxy-tls'
+        ? 'https://127.0.0.1:443'
+        : endpoint,
+    received,
+    async expectClosed() {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        expect(
+          await Promise.race([
+            peerClosed.then(() => true),
+            new Promise<boolean>((resolve) => {
+              timer = setTimeout(() => resolve(false), 500)
+            }),
+          ]),
+        ).toBe(true)
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+    async dispose() {
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      mock.module('node:tls', () => nativeTls)
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    },
+  }
+}
+
+describe('createRequestExecutor pre-response deadline', () => {
+  for (const phase of ['origin', 'tls', 'connect', 'proxy-tls'] as const) {
+    it(
+      phase === 'origin'
+        ? 'pre-response deadline stops a TLS-connected silent origin'
+        : `pre-response deadline includes stalled TLS and proxy CONNECT (${phase})`,
+      async () => {
+        const peer = await silentPeer(phase)
+        const clock = deadlineClock()
+        const caller = new AbortController()
+        const h = harness({
+          respond: (call) =>
+            fetchWithAgyCliTransport(
+              `${peer.endpoint}/v1internal:streamGenerateContent`,
+              call.init,
+              call.options,
+            ),
+        })
+        Object.assign(h.deps, { preResponseClock: clock })
+        const executor = createRequestExecutor(h.deps)
+        let release: ReturnType<typeof setTimeout> | undefined
+        try {
+          const pending = executor.execute(STREAM_URL, CHAT_INIT(caller.signal))
+          await Promise.race([
+            peer.received,
+            pending.then((response) => {
+              throw new Error(
+                `request ended before phase receipt: ${response.status}`,
+              )
+            }),
+          ])
+          release = setTimeout(
+            () => caller.abort(new Error('silent peer fixture safety release')),
+            1000,
+          )
+          clock.advance(PRE_RESPONSE_DEADLINE_MS)
+          const response = await pending
+          expect(response.status).toBe(412)
+          expect(await response.text()).toContain(PRE_RESPONSE_TIMEOUT_MESSAGE)
+          await peer.expectClosed()
+          expect(h.calls).toHaveLength(1)
+        } finally {
+          clearTimeout(release)
+          await peer.dispose()
+          await executor.dispose()
+        }
+      },
+    )
+  }
+
+  it('GA bridge propagates timeout policy and preserves five minute idle', async () => {
+    const peer = await silentPeer('origin')
+    const clock = deadlineClock()
+    const h = harness()
+    Object.assign(h.deps, { preResponseClock: clock })
+    const executor = createRequestExecutor(h.deps)
+    let sentSignal: AbortSignal | undefined
+    const observed: AbortSignal[] = []
+    const raw = createGaRawSender({
+      observeRawSenderSignal: (signal) => {
+        observed.push(signal)
+      },
+    })
+    const bridge = await startGaLoopbackBridge({
+      execute: createGaJobExecutor(executor, {
+        send: (input) => {
+          sentSignal = input.signal
+          return raw({ ...input, endpoint: peer.endpoint })
+        },
+      }),
+      send: async () => {
+        throw new Error('unexpected bridge raw send')
+      },
+    })
+    try {
+      const request = bridge.rewrite(
+        new Request(STREAM_URL, CHAT_INIT()),
+        {
+          sessionID: 'deadline-ga',
+          parentSessionID: null,
+          kind: 'primary',
+          modelID: 'gemini-3-flash',
+          variant: null,
+          url: STREAM_URL,
+          body: String(CHAT_INIT().body),
+        },
+        { HTTP_PROXY: undefined, HTTPS_PROXY: undefined, ALL_PROXY: undefined },
+      )
+      const pending = fetch(request)
+      await peer.received
+      clock.advance(PRE_RESPONSE_DEADLINE_MS)
+      const response = await pending
+      expect(response.status).toBe(412)
+      expect(await response.text()).toContain(PRE_RESPONSE_TIMEOUT_MESSAGE)
+      expect(response.headers.has('retry-after')).toBe(false)
+      expect(sentSignal?.aborted).toBe(true)
+      expect(observed).toEqual([sentSignal!])
+      expect(GA_RAW_IDLE_TIMEOUT_MS).toBe(300_000)
+      await peer.expectClosed()
+    } finally {
+      await peer.dispose()
+      await bridge.dispose()
+      await executor.dispose()
+    }
+  })
+
+  it('pre-response deadline is shared across daily prod and account revisits', async () => {
+    const clock = deadlineClock()
+    const h = harness({
+      pool: makePool(2),
+      config: { max_account_switches: 20 },
+      respond: async () => {
+        clock.advance(PRE_RESPONSE_DEADLINE_MS / 5)
+        throw new Error('ordinary attempt timeout')
+      },
+    })
+    Object.assign(h.deps, { preResponseClock: clock })
+    const rows = h.pool.getAccounts()
+    let selections = 0
+    spyOn(h.pool, 'getCurrentOrNextForFamily').mockImplementation(
+      () => rows[Math.floor(selections++ % 2)] ?? null,
+    )
+    const failures = spyOn(h.pool, 'markAccountCoolingDown')
+    const response = await createRequestExecutor(h.deps).execute(
+      NON_STREAM_URL,
+      CHAT_INIT(),
+    )
+    expect(response.status).toBe(412)
+    expect(await response.json()).toEqual({
+      error: {
+        code: 412,
+        status: 'FAILED_PRECONDITION',
+        message: PRE_RESPONSE_TIMEOUT_MESSAGE,
+      },
+    })
+    expect(h.calls.map((call) => new URL(call.url).origin)).toEqual([
+      ANTIGRAVITY_ENDPOINT_FALLBACKS[0],
+      ANTIGRAVITY_ENDPOINT_FALLBACKS[1],
+      ANTIGRAVITY_ENDPOINT_FALLBACKS[0],
+      ANTIGRAVITY_ENDPOINT_FALLBACKS[1],
+      ANTIGRAVITY_ENDPOINT_FALLBACKS[0],
+    ])
+    expect(selections).toBe(3)
+    expect(failures).not.toHaveBeenCalled()
+    expect(clock.pending()).toBe(0)
+  })
+
+  it('pre-response deadline bounds retryable error body classification', async () => {
+    const clock = deadlineClock()
+    let body: ReadableStreamDefaultController<Uint8Array> | undefined
+    const h = harness({
+      respond: async () => {
+        const response = new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              body = controller
+            },
+          }),
+          { status: 503 },
+        )
+        // Advance after classification starts; the body never reaches EOF.
+        setTimeout(() => {
+          clock.advance(PRE_RESPONSE_DEADLINE_MS)
+        }, 0)
+        return response
+      },
+    })
+    Object.assign(h.deps, { preResponseClock: clock })
+    try {
+      const response = await createRequestExecutor(h.deps).execute(
+        STREAM_URL,
+        CHAT_INIT(),
+      )
+      expect(response.status).toBe(412)
+      expect(await response.text()).toContain(PRE_RESPONSE_TIMEOUT_MESSAGE)
+      expect(h.calls).toHaveLength(1)
+      expect(clock.pending()).toBe(0)
+    } finally {
+      body?.error(new Error('fixture released'))
+    }
+  })
+
+  it('empty-response resend retains the original pre-response deadline', async () => {
+    const clock = deadlineClock()
+    const h = harness({
+      respond: async (_call, index) => {
+        if (index > 0) return okJson()
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              setTimeout(() => {
+                clock.advance(PRE_RESPONSE_DEADLINE_MS)
+                controller.enqueue(
+                  new TextEncoder().encode('{"response":{"candidates":[]}}'),
+                )
+                controller.close()
+              }, 0)
+            },
+          }),
+          { headers: { 'content-type': 'application/json' } },
+        )
+      },
+      config: { empty_response_retry_delay_ms: 1 },
+    })
+    Object.assign(h.deps, { preResponseClock: clock })
+    const response = await createRequestExecutor(h.deps).execute(
+      NON_STREAM_URL,
+      CHAT_INIT(),
+    )
+    expect(response.status).toBe(412)
+    expect(h.calls).toHaveLength(1)
+  })
+
+  it('expiry during retryable diagnostics bypasses account failure and cooldown recording', async () => {
+    const clock = deadlineClock()
+    const h = harness({
+      respond: async () =>
+        new Response('{"error":{"status":"RESOURCE_EXHAUSTED"}}', {
+          status: 429,
+        }),
+    })
+    Object.assign(h.deps, { preResponseClock: clock })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    spyOn(h.deps.debug, 'logResponseBody').mockImplementation(async () => {
+      clock.advance(PRE_RESPONSE_DEADLINE_MS)
+      await held
+    })
+    const rate = spyOn(h.deps.trackers.health, 'recordRateLimit')
+    const cooldown = spyOn(h.pool, 'markAccountCoolingDown')
+    const response = await createRequestExecutor(h.deps).execute(
+      STREAM_URL,
+      CHAT_INIT(),
+    )
+    expect(response.status).toBe(412)
+    release()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(rate).not.toHaveBeenCalled()
+    expect(cooldown).not.toHaveBeenCalled()
+    expect(h.calls).toHaveLength(1)
+  })
+
+  it('successful headers disarm only the pre-response timer', async () => {
+    for (const streaming of [false, true]) {
+      const clock = deadlineClock()
+      const h = harness({
+        respond: async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                setTimeout(() => {
+                  clock.advance(PRE_RESPONSE_DEADLINE_MS * 2)
+                  const json =
+                    '{"response":{"candidates":[{"content":{"parts":[{"text":"late token"}]},"finishReason":"STOP"}]}}'
+                  controller.enqueue(
+                    new TextEncoder().encode(
+                      streaming ? `data: ${json}\n\n` : json,
+                    ),
+                  )
+                  controller.close()
+                }, 0)
+              },
+            }),
+            {
+              headers: {
+                'content-type': streaming
+                  ? 'text/event-stream'
+                  : 'application/json',
+              },
+            },
+          ),
+      })
+      Object.assign(h.deps, { preResponseClock: clock })
+      const response = await createRequestExecutor(h.deps).execute(
+        streaming ? STREAM_URL : NON_STREAM_URL,
+        CHAT_INIT(),
+      )
+      expect(response.status).toBe(200)
+      expect(await response.text()).toContain('late token')
+      expect(h.calls[0]?.options?.signal?.aborted).toBe(false)
+      expect(clock.pending()).toBe(0)
+    }
+  })
+
+  for (const warmup of ['thinking', 'cache'] as const) {
+    for (const phase of ['headers', 'body'] as const) {
+      it(`pre-response deadline includes warmup before main headers (${warmup} ${phase})`, async () => {
+        const clock = deadlineClock()
+        const h = harness({
+          pool: makePool(2),
+          config: {
+            thinking_warmup: warmup === 'thinking',
+            cache_warmup_on_switch: warmup === 'cache',
+          },
+          respond: async (_call, index) => {
+            if (warmup === 'cache' && index === 0)
+              return new Response('ineligible', { status: 403 })
+            if (phase === 'headers') {
+              clock.advance(PRE_RESPONSE_DEADLINE_MS)
+              throw new Error('fixture header stall ended')
+            }
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  setTimeout(() => {
+                    clock.advance(PRE_RESPONSE_DEADLINE_MS)
+                    controller.error(new Error('fixture drip ended'))
+                  }, 0)
+                },
+              }),
+            )
+          },
+        })
+        const rows = h.pool.getAccounts()
+        let index = 0
+        spyOn(h.pool, 'getCurrentOrNextForFamily').mockImplementation(
+          () => rows[index++ % rows.length] ?? null,
+        )
+        h.deps.classifyAccessError = () => ({
+          accountIneligible: true,
+          validationRequired: false,
+        })
+        Object.assign(h.deps, {
+          wire: {
+            ...h.deps.wire,
+            prepare: (...args) => ({
+              ...WIRE.prepare(...args),
+              needsSignedThinkingWarmup: true,
+              sessionId: `deadline-${warmup}-${phase}`,
+            }),
+            buildThinkingWarmupBody: () => 'warmup',
+            transformResponse: async (response) => response,
+          } satisfies RequestWire,
+        })
+        Object.assign(h.deps, { preResponseClock: clock })
+        const failures = spyOn(h.pool, 'markAccountCoolingDown')
+        const response = await createRequestExecutor(h.deps).execute(
+          STREAM_URL,
+          CHAT_INIT(),
+        )
+        expect(response.status).toBe(412)
+        expect(await response.text()).toContain(PRE_RESPONSE_TIMEOUT_MESSAGE)
+        expect(h.calls).toHaveLength(warmup === 'cache' ? 2 : 1)
+        expect(failures).not.toHaveBeenCalled()
+        expect(clock.pending()).toBe(0)
+      })
+    }
+  }
+
+  it('thinking warmup rethrows a tagged deadline without sending the main request', async () => {
+    const clock = deadlineClock()
+    const h = harness({
+      config: { thinking_warmup: true },
+      respond: async (_call, index) => {
+        if (index === 0) throw new PreResponseTimeoutError()
+        return okJson()
+      },
+    })
+    Object.assign(h.deps, {
+      wire: {
+        ...h.deps.wire,
+        prepare: (...args) => ({
+          ...WIRE.prepare(...args),
+          needsSignedThinkingWarmup: true,
+          sessionId: 'tagged-deadline',
+        }),
+        buildThinkingWarmupBody: () => 'warmup',
+      } satisfies RequestWire,
+    })
+    Object.assign(h.deps, { preResponseClock: clock })
+    const response = await createRequestExecutor(h.deps).execute(
+      STREAM_URL,
+      CHAT_INIT(),
+    )
+    expect(response.status).toBe(412)
+    expect(h.calls).toHaveLength(1)
+  })
+
+  for (const phase of ['admission', 'project', 'dispatch', 'warmup'] as const) {
+    it(`cancel pre-response work without retry or timeout conversion (${phase})`, async () => {
+      const clock = deadlineClock()
+      const caller = new AbortController()
+      const reason = new Error('caller stopped the request')
+      const stall = async () => {
+        caller.abort(reason)
+        return new Promise<never>(() => {})
+      }
+      const h = harness({
+        config: { thinking_warmup: phase === 'warmup' },
+        respond: stall,
+      })
+      if (phase === 'admission')
+        Object.assign(h.deps, { assertAdmission: stall })
+      if (phase === 'project' && h.deps.credentials.domain === 'local')
+        h.deps.credentials.ensureProject = stall
+      if (phase === 'warmup')
+        Object.assign(h.deps, {
+          wire: {
+            ...h.deps.wire,
+            prepare: (...args) => ({
+              ...WIRE.prepare(...args),
+              needsSignedThinkingWarmup: true,
+              sessionId: 'cancel-warmup',
+            }),
+            buildThinkingWarmupBody: () => 'warmup',
+          } satisfies RequestWire,
+        })
+      Object.assign(h.deps, { preResponseClock: clock })
+      const executor = createRequestExecutor(h.deps)
+      await expect(
+        executor.execute(STREAM_URL, CHAT_INIT(caller.signal)),
+      ).rejects.toThrow(reason.message)
+      clock.advance(PRE_RESPONSE_DEADLINE_MS)
+      expect(h.calls).toHaveLength(
+        phase === 'dispatch' || phase === 'warmup' ? 1 : 0,
+      )
+      expect(clock.pending()).toBe(0)
+      await executor.dispose()
+    })
+  }
+
+  it('Request signal and init override are extracted before the first await', async () => {
+    const h = harness({ respond: async () => okJson() })
+    const requestCaller = new AbortController()
+    requestCaller.abort(new Error('Request cancelled'))
+    const admission = mock(async () => {})
+    Object.assign(h.deps, { assertAdmission: admission })
+    const request = new Request(STREAM_URL, CHAT_INIT(requestCaller.signal))
+    const executor = createRequestExecutor(h.deps)
+    await expect(executor.execute(request)).rejects.toThrow('Request cancelled')
+    expect(admission).not.toHaveBeenCalled()
+    const response = await executor.execute(request, {
+      signal: new AbortController().signal,
+    })
+    expect(response.status).toBe(200)
+    await response.text()
+    await executor.dispose()
+  })
+
+  it('blocked-pool eligibility resets quota waiting but never replenishes the pre-response deadline', async () => {
+    const clock = deadlineClock()
+    let wall = FIXED_NOW
+    const delays: number[] = []
+    const h = harness({
+      pool: makePool(2),
+      config: {
+        max_rate_limit_wait_seconds: (PRE_RESPONSE_DEADLINE_MS * 0.75) / 1000,
+      },
+      respond: async () => {
+        wall += PRE_RESPONSE_DEADLINE_MS / 8
+        clock.advance(PRE_RESPONSE_DEADLINE_MS / 8)
+        throw new Error('attempt failed')
+      },
+    })
+    Object.assign(h.deps, { preResponseClock: clock })
+    const row = h.pool.getAccounts()[0]!
+    spyOn(h.pool, 'requestSaveToDisk').mockImplementation(() => {})
+    spyOn(h.pool, 'getCurrentOrNextForFamily').mockImplementation(() =>
+      delays.length >= 2 && h.calls.length === 0 ? row : null,
+    )
+    spyOn(h.pool, 'getMinWaitTimeForFamily').mockReturnValue(
+      PRE_RESPONSE_DEADLINE_MS / 4,
+    )
+    const date = spyOn(Date, 'now').mockImplementation(() => wall)
+    const real = globalThis.setTimeout
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((
+      callback: () => void,
+      delay: number,
+    ) => {
+      const handle = real(() => {}, 2 ** 30)
+      handle.unref()
+      queueMicrotask(() => {
+        clearTimeout(handle)
+        delays.push(delay)
+        wall += delay
+        clock.advance(delay)
+        callback()
+      })
+      return handle
+    }) as typeof setTimeout)
+    try {
+      const response = await createRequestExecutor(h.deps).execute(
+        STREAM_URL,
+        CHAT_INIT(),
+      )
+      expect(await response.text()).toContain(PRE_RESPONSE_TIMEOUT_MESSAGE)
+      expect(h.calls).toHaveLength(2)
+      expect(delays).toEqual(Array(3).fill(PRE_RESPONSE_DEADLINE_MS / 4))
+      expect(wall - FIXED_NOW).toBe(PRE_RESPONSE_DEADLINE_MS)
+    } finally {
+      timer.mockRestore()
+      date.mockRestore()
+    }
+  })
+
+  for (const quotaMs of [
+    PRE_RESPONSE_DEADLINE_MS / 2,
+    PRE_RESPONSE_DEADLINE_MS,
+    PRE_RESPONSE_DEADLINE_MS * 2,
+    0,
+  ]) {
+    it(`blocked-pool wait budget and pre-response deadline do not reset each other (quota ${quotaMs})`, async () => {
+      const clock = deadlineClock()
+      let wall = FIXED_NOW
+      const h = harness({
+        config: { max_rate_limit_wait_seconds: quotaMs / 1000 },
+      })
+      Object.assign(h.deps, { preResponseClock: clock })
+      spyOn(h.pool, 'getCurrentOrNextForFamily').mockReturnValue(null)
+      spyOn(h.pool, 'getMinWaitTimeForFamily').mockReturnValue(
+        PRE_RESPONSE_DEADLINE_MS / 4,
+      )
+      const date = spyOn(Date, 'now').mockImplementation(() => wall)
+      const real = globalThis.setTimeout
+      const delays: number[] = []
+      const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((
+        callback: () => void,
+        delay: number,
+      ) => {
+        const handle = real(() => {}, 2 ** 30)
+        handle.unref()
+        queueMicrotask(() => {
+          clearTimeout(handle)
+          delays.push(delay)
+          wall += delay
+          clock.advance(delay)
+          callback()
+        })
+        return handle
+      }) as typeof setTimeout)
+      try {
+        const response = await createRequestExecutor(h.deps).execute(
+          STREAM_URL,
+          CHAT_INIT(),
+        )
+        const text = await response.text()
+        expect(response.status).toBe(412)
+        expect(text.includes(PRE_RESPONSE_TIMEOUT_MESSAGE)).toBe(
+          quotaMs === 0 || quotaMs > PRE_RESPONSE_DEADLINE_MS,
+        )
+        expect(wall - FIXED_NOW).toBe(
+          quotaMs > 0
+            ? Math.min(quotaMs, PRE_RESPONSE_DEADLINE_MS)
+            : PRE_RESPONSE_DEADLINE_MS,
+        )
+        expect(
+          delays.every((delay) => delay <= PRE_RESPONSE_DEADLINE_MS / 4),
+        ).toBe(true)
+        expect(h.calls).toHaveLength(0)
+      } finally {
+        timer.mockRestore()
+        date.mockRestore()
+      }
+    })
+  }
+})
+
 describe('createRequestExecutor cumulative no-account wait budget', () => {
   function blockedHarness(
     kind: 'rate' | 'soft' | 'mixed',
@@ -648,6 +1376,8 @@ describe('createRequestExecutor cumulative no-account wait budget', () => {
       validationRequired: false,
     })
     const dateSpy = spyOn(Date, 'now').mockImplementation(() => now)
+    const clock = deadlineClock()
+    Object.assign(h.deps, { preResponseClock: clock })
     const realTimeout = globalThis.setTimeout
     const timerSpy = spyOn(globalThis, 'setTimeout').mockImplementation(((
       callback: () => void,
@@ -666,6 +1396,7 @@ describe('createRequestExecutor cumulative no-account wait budget', () => {
           return
         }
         now += delay
+        clock.advance(delay)
         callback()
       })
       return handle

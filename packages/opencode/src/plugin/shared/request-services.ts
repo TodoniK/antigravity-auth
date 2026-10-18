@@ -32,8 +32,13 @@ import {
   isRetiredAgyModel,
   type ManagedAccount,
   type OAuthAuthDetails,
+  PRE_RESPONSE_DEADLINE_MS,
+  type PreResponseClock,
+  PreResponseDeadline,
+  PreResponseTimeoutError,
   type ProjectContextResult,
   parseRateLimitReason,
+  preResponseTimeoutResponse,
   preserveResponseMetadata,
   type QuotaGroup,
   type QuotaGroupSummary,
@@ -413,6 +418,7 @@ export type RequestDebug = Pick<
  * becomes a token and project.
  */
 export interface RequestServicesDeps<A extends RequestAccountRow> {
+  readonly preResponseClock?: PreResponseClock
   /** Check the persistent account source before each operation that uses credentials. */
   readonly assertAdmission?: () => Promise<void>
   readonly config: AntigravityConfig
@@ -821,15 +827,18 @@ export function createRequestExecutor<A extends RequestAccountRow>(
 
   async function execute(
     input: RequestInfo | URL,
-    init?: RequestInit,
-    options: RequestExecuteOptions = {},
-    selectedCredentials: Set<string> = new Set(),
+    init: RequestInit | undefined,
+    options: RequestExecuteOptions,
+    selectedCredentials: Set<string>,
+    deadline: PreResponseDeadline,
+    waitPolicy: { refusal?: () => Response },
   ): Promise<Response> {
     const assertAdmission = async (): Promise<void> => {
-      init?.signal?.throwIfAborted()
-      await deps.assertAdmission?.()
-      init?.signal?.throwIfAborted()
+      await deadline.wait(() => deps.assertAdmission?.())
     }
+    const logResponseBody = (
+      ...args: Parameters<typeof debug.logResponseBody>
+    ) => deadline.wait(() => debug.logResponseBody(...args))
     await assertAdmission()
     // Normalize Request/URL inputs to (urlString, init) so the string-based
     // transform pipeline sees the real method/headers/body. Without this,
@@ -845,7 +854,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           })
         }
         const bodyBuffer = req.body
-          ? await req.clone().arrayBuffer()
+          ? await deadline.wait(() => req.clone().arrayBuffer())
           : undefined
         init = {
           method: init?.method ?? req.method,
@@ -917,7 +926,11 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     // A host that sends each request through its own raw sender (the GA
     // loopback bridge) supplies it per request; every send of this request,
     // warmups included, then goes through it with the same AbortSignal.
-    const transport = options.transport ?? defaultTransport
+    const sender = options.transport ?? defaultTransport
+    const transport: RequestTransport = (url, sendInit, sendOptions) =>
+      deadline.open(() =>
+        sender(url, sendInit, { ...sendOptions, signal: deadline.signal }),
+      )
     const requestSessionIdentity =
       options.session ?? extractOpenCodeSessionIdentity(init?.headers)
     // AGY conversation/trajectory/step metadata is kept per session and
@@ -992,6 +1005,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     const abortSignal = init?.signal ?? undefined
 
     const checkAborted = () => {
+      deadline.check()
       if (abortSignal?.aborted) {
         throw abortSignal.reason instanceof Error
           ? abortSignal.reason
@@ -1032,8 +1046,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       }
 
       try {
-        await notify?.(message, variant)
+        await deadline.wait(() => notify?.(message, variant))
       } catch {
+        checkAborted()
         // TUI may not be available
       }
     }
@@ -1171,6 +1186,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           maxWaitMs > 0
             ? Math.max(0, maxWaitMs - (Date.now() - blockedSince))
             : Number.POSITIVE_INFINITY
+        // At an equal deadline, retain the classified blocked-pool refusal.
+        // This priority never changes either clock or replenishes the request.
+        const quotaWins = remainingWaitMs() <= deadline.remainingMs()
 
         if (
           accountManager.areAllAccountsOverSoftQuota(
@@ -1187,6 +1205,14 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             softQuotaCacheTtlMs,
             model,
           )
+          waitPolicy.refusal = quotaWins
+            ? () =>
+                createNativeGoogleErrorResponse({
+                  status: 412,
+                  reason: 'soft_quota',
+                  resetAfterMs: softQuotaWaitMs,
+                })
+            : undefined
           if (
             softQuotaWaitMs === null ||
             remainingWaitMs() <= 0 ||
@@ -1224,6 +1250,14 @@ export function createRequestExecutor<A extends RequestAccountRow>(
 
         const minWaitMs = accountManager.getMinWaitTimeForFamily(family, model)
         const waitMs = minWaitMs || 60_000
+        waitPolicy.refusal = quotaWins
+          ? () =>
+              createNativeGoogleErrorResponse({
+                status: 412,
+                reason: 'pool_unavailable',
+                resetAfterMs: minWaitMs > 0 ? minWaitMs : undefined,
+              })
+          : undefined
 
         pushDebug(
           `all-rate-limited family=${family} accounts=${accountCount} waitMs=${waitMs}`,
@@ -1270,6 +1304,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
 
       // An eligible account ends the contiguous all-accounts-blocked period.
       allAccountsBlockedAt = undefined
+      waitPolicy.refusal = undefined
       retryState.resetAllAccountsBlockedToasts()
 
       pushDebug(
@@ -1333,8 +1368,8 @@ export function createRequestExecutor<A extends RequestAccountRow>(
         await assertAdmission()
         // Project resolution can use this bearer before the main model send.
         if (auth.access) selectedCredentials.add(auth.access)
-        const context = await credentials
-          .ensureProject(auth)
+        const context = await deadline
+          .wait(() => credentials.ensureProject(auth))
           .catch((error: unknown) => {
             throw redactCredentialError(error, [...selectedCredentials])
           })
@@ -1349,8 +1384,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
         if (persistProject && projectAuth.refresh !== auth.refresh) {
           credentials.updateFromAuth(account, projectAuth)
           try {
-            await credentials.saveToDisk()
+            await deadline.wait(() => credentials.saveToDisk())
           } catch (error) {
+            checkAborted()
             log.error('Failed to persist project context', {
               error: String(error),
             })
@@ -1382,7 +1418,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
         if (accessTokenExpired(authRecord)) {
           try {
             await assertAdmission()
-            const refreshed = await credentials.refresh(account)
+            const refreshed = await deadline.wait(() =>
+              credentials.refresh(account),
+            )
             if (!refreshed) {
               const { failures, shouldCooldown, cooldownMs } =
                 retryState.trackAccountFailure(account.index)
@@ -1421,13 +1459,15 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             authRecord = refreshed
             grantCheck = captureFor(authRecord)
             try {
-              await credentials.saveToDisk()
+              await deadline.wait(() => credentials.saveToDisk())
             } catch (error) {
+              checkAborted()
               log.error('Failed to persist refreshed auth', {
                 error: String(error),
               })
             }
           } catch (error) {
+            checkAborted()
             if (credentials.isInvalidGrant(error)) {
               const removed = credentials.removeAccount(account)
               if (removed) {
@@ -1435,8 +1475,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                   'Removed revoked account from pool - reauthenticate via `opencode auth login`',
                 )
                 try {
-                  await credentials.saveToDiskReplace()
+                  await deadline.wait(() => credentials.saveToDiskReplace())
                 } catch (persistError) {
+                  checkAborted()
                   log.error('Failed to persist revoked account removal', {
                     error: String(persistError),
                   })
@@ -1445,8 +1486,9 @@ export function createRequestExecutor<A extends RequestAccountRow>(
 
               if (accountManager.getAccountCount() === 0) {
                 try {
-                  await credentials.clearStoredAuth()
+                  await deadline.wait(() => credentials.clearStoredAuth())
                 } catch (storeError) {
+                  checkAborted()
                   log.error(
                     'Failed to clear stored Antigravity OAuth credentials',
                     {
@@ -1504,6 +1546,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           localGrant = await prepareLocalGrant(authRecord, grantCheck)
           retryState.resetAccountFailureState(account.index)
         } catch (error) {
+          checkAborted()
           const { failures, shouldCooldown, cooldownMs } =
             retryState.trackAccountFailure(account.index)
           trackers.health.recordFailure(account.index)
@@ -1536,10 +1579,12 @@ export function createRequestExecutor<A extends RequestAccountRow>(
       ): Promise<{ init: RequestInit; admission?: RequestSendAdmission }> => {
         await assertAdmission()
         if (credentials.domain === 'vault') {
-          const admission = await credentials.admit({
-            account: selected,
-            signal: abortSignal,
-          })
+          const admission = await deadline.wait(() =>
+            credentials.admit({
+              account: selected,
+              signal: abortSignal,
+            }),
+          )
           selectedCredentials.add(admission.accessToken)
           if (admission.projectId !== preparedProjectId) {
             throw new Error(
@@ -1555,7 +1600,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             'Local credentials were not resolved for the selected account',
           )
         }
-        await localGrant.captured.check()
+        await deadline.wait(() => localGrant!.captured.check())
         await assertAdmission()
         return { init: sendInit }
       }
@@ -1608,21 +1653,25 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             onDebug: pushDebug,
           })
           reportVault401(warmupSend.admission, warmupResponse.status)
-          const transformed = await wire.transformResponse(
-            warmupResponse,
-            true,
-            warmupDebugContext,
-            prepared.requestedModel,
-            projectId,
-            warmupUrl,
-            prepared.effectiveModel,
-            prepared.sessionId,
+          const transformed = await deadline.wait(() =>
+            wire.transformResponse(
+              warmupResponse,
+              true,
+              warmupDebugContext,
+              prepared.requestedModel,
+              projectId,
+              warmupUrl,
+              prepared.effectiveModel,
+              prepared.sessionId,
+            ),
           )
-          await transformed.text()
+          await deadline.wait(() => transformed.text())
           warmupState.markSuccess(prepared.sessionId)
           pushDebug('thinking-warmup: done')
         } catch (error) {
           warmupState.clearWarmupAttempt(prepared.sessionId)
+          if (error instanceof PreResponseTimeoutError) throw error
+          checkAborted()
           if (isLocalGrantError(error)) throw error
           pushDebug(
             `thinking-warmup: failed ${error instanceof Error ? error.message : String(error)}`,
@@ -1661,15 +1710,17 @@ export function createRequestExecutor<A extends RequestAccountRow>(
 
           if (probeResponse.body) {
             const reader = probeResponse.body.getReader()
-            await reader.read()
-            await reader.cancel()
+            await deadline.wait(() => reader.read())
+            await deadline.wait(() => reader.cancel())
           }
 
           const status = probeResponse.status
           if (status >= 400) {
             let errorSnippet = ''
             try {
-              const errText = await probeResponse.text().catch(() => '')
+              const errText = await deadline.wait(() =>
+                probeResponse.text().catch(() => ''),
+              )
               errorSnippet = errText.slice(0, 200)
             } catch {
               /* ignore */
@@ -1683,6 +1734,8 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             )
           }
         } catch (error) {
+          if (error instanceof PreResponseTimeoutError) throw error
+          checkAborted()
           if (isLocalGrantError(error)) {
             needsCacheWarmup = true
             throw error
@@ -1739,10 +1792,12 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               // retry it was taken for, then is gone.
               sendAdmission =
                 rotatedAdmission ??
-                (await credentials.admit({
-                  account,
-                  signal: abortSignal,
-                }))
+                (await deadline.wait(() =>
+                  credentials.admit({
+                    account,
+                    signal: abortSignal,
+                  }),
+                ))
               rotatedAdmission = undefined
               sendAccessToken = sendAdmission.accessToken
               sendProjectId = sendAdmission.projectId
@@ -1838,7 +1893,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                   'Local credentials were not resolved for the selected account',
                 )
               }
-              await localGrant.captured.check()
+              await deadline.wait(() => localGrant!.captured.check())
               await assertAdmission()
             }
 
@@ -1851,6 +1906,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               prepared.init,
               { signal: abortSignal, onDebug: pushDebug },
             )
+            if (response.ok) deadline.acceptHeaders()
             apiRequestCount++
             accountManager.recordRequest(account.index, family)
             const requestCounts = accountManager.getDailyRequestCounts(
@@ -1875,17 +1931,22 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               // version of the same credential and account may retry this
               // endpoint, once; otherwise the 401 stands.
               try {
-                await sendAdmission.report401(response.status)
+                await deadline.wait(() =>
+                  sendAdmission!.report401(response.status),
+                )
               } catch (error) {
+                checkAborted()
                 log.debug('send-admission-401-report-failed', {
                   error: String(error),
                 })
               }
               if (!vault401Retried) {
-                const next = await credentials.admit({
-                  account,
-                  signal: abortSignal,
-                })
+                const next = await deadline.wait(() =>
+                  credentials.admit({
+                    account,
+                    signal: abortSignal,
+                  }),
+                )
                 if (
                   next.credentialId === sendAdmission.credentialId &&
                   next.accountIdentity === sendAdmission.accountIdentity &&
@@ -1937,13 +1998,16 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               )
               const bodyInfo = await (async () => {
                 try {
-                  const text = await response.clone().text()
+                  const text = await deadline.wait(() =>
+                    response.clone().text(),
+                  )
                   try {
                     return JSON.parse(text) as unknown
                   } catch {
                     return null
                   }
                 } catch {
+                  checkAborted()
                   return null
                 }
               })()
@@ -2045,7 +2109,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                 effectiveDelayMs,
                 reasonInfo,
               )
-              await debug.logResponseBody(debugContext, response, 429)
+              await logResponseBody(debugContext, response, 429)
               trackers.health.recordRateLimit(account.index)
 
               const _accountLabel =
@@ -2149,10 +2213,12 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             retryState.resetAccountFailureState(account.index)
 
             if (response.status === 403) {
-              const errorBodyText = await response
-                .clone()
-                .text()
-                .catch(() => '')
+              const errorBodyText = await deadline.wait(() =>
+                response
+                  .clone()
+                  .text()
+                  .catch(() => ''),
+              )
               const extracted = classifyAccessError(errorBodyText)
 
               if (extracted.accountIneligible) {
@@ -2237,11 +2303,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               shouldRetryEndpoint &&
               i < ANTIGRAVITY_ENDPOINT_FALLBACKS.length - 1
             ) {
-              await debug.logResponseBody(
-                debugContext,
-                response,
-                response.status,
-              )
+              await logResponseBody(debugContext, response, response.status)
               lastFailure = createFailureContext(response)
               continue
             }
@@ -2319,22 +2381,14 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               note: response.ok ? 'Success' : `Error ${response.status}`,
             })
             if (response.ok && !prepared.streaming) {
-              await debug.logResponseBody(
-                debugContext,
-                response,
-                response.status,
-              )
+              await logResponseBody(debugContext, response, response.status)
             }
             if (!response.ok) {
-              await debug.logResponseBody(
-                debugContext,
-                response,
-                response.status,
-              )
+              await logResponseBody(debugContext, response, response.status)
 
               if (response.status === 400) {
                 const cloned = response.clone()
-                const bodyText = await cloned.text()
+                const bodyText = await deadline.wait(() => cloned.text())
                 if (
                   bodyText.includes('Prompt is too long') ||
                   bodyText.includes('prompt_too_long')
@@ -2356,7 +2410,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               const retryDelayMs = config.empty_response_retry_delay_ms ?? 2000
 
               const clonedForCheck = response.clone()
-              const bodyText = await clonedForCheck.text()
+              const bodyText = await deadline.wait(() => clonedForCheck.text())
 
               if (isEmptyResponseBody(bodyText)) {
                 const emptyAttemptKey = `${prepared.sessionId ?? 'none'}:${prepared.effectiveModel ?? 'unknown'}`
@@ -2368,6 +2422,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                 )
 
                 if (currentAttempts < maxAttempts) {
+                  deadline.resume()
                   await showToast(
                     `Empty response received. Retrying (${currentAttempts}/${maxAttempts})...`,
                     'warning',
@@ -2387,19 +2442,21 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               retryState.clearEmptyResponseAttempts()
             }
 
-            const transformedResponse = await wire.transformResponse(
-              response,
-              prepared.streaming,
-              debugContext,
-              prepared.requestedModel,
-              prepared.projectId,
-              prepared.endpoint,
-              prepared.effectiveModel,
-              prepared.sessionId,
-              prepared.toolDebugMissing,
-              prepared.toolDebugSummary,
-              debugLines,
-              dumpContext,
+            const transformedResponse = await deadline.wait(() =>
+              wire.transformResponse(
+                response,
+                prepared.streaming,
+                debugContext,
+                prepared.requestedModel,
+                prepared.projectId,
+                prepared.endpoint,
+                prepared.effectiveModel,
+                prepared.sessionId,
+                prepared.toolDebugMissing,
+                prepared.toolDebugSummary,
+                debugLines,
+                dumpContext,
+              ),
             )
 
             const contextError = transformedResponse.headers.get(
@@ -2465,6 +2522,8 @@ export function createRequestExecutor<A extends RequestAccountRow>(
 
             return transformedResponse
           } catch (error) {
+            if (error instanceof PreResponseTimeoutError) throw error
+            checkAborted()
             if (
               tokenConsumed &&
               (!isLocalGrantError(error) || !physicalAttemptStarted)
@@ -2487,7 +2546,8 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               ) {
                 localRecaptureUsed = true
                 try {
-                  await localGrant.captured.resolveCurrent()
+                  const originalGrant = localGrant.captured
+                  await deadline.wait(() => originalGrant.resolveCurrent())
                   const auth = credentials.toAuthDetails(account)
                   if (!auth.access || accessTokenExpired(auth))
                     return createNativeGoogleErrorResponse({
@@ -2516,6 +2576,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
               error.message === 'THINKING_RECOVERY_NEEDED'
             ) {
               if (!forceThinkingRecovery) {
+                deadline.resume()
                 pushDebug(
                   'thinking-recovery: API error detected, retrying with forced recovery',
                 )
@@ -2694,18 +2755,41 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           ? [requestedSignal, shutdown.signal]
           : [shutdown.signal],
       )
-      const selectedCredentials = new Set<string>()
-      const pending = execute(
-        input,
-        { ...init, signal: cancellation.signal },
-        requestOptions,
-        selectedCredentials,
+      const deadline = new PreResponseDeadline(
+        cancellation.signal,
+        deps.preResponseClock,
       )
+      log.debug('pre-response-start', { limitMs: PRE_RESPONSE_DEADLINE_MS })
+      const waitPolicy: { refusal?: () => Response } = {}
+      const selectedCredentials = new Set<string>()
+      const pending = deadline
+        .wait(() =>
+          execute(
+            input,
+            { ...init, signal: deadline.signal },
+            requestOptions ?? {},
+            selectedCredentials,
+            deadline,
+            waitPolicy,
+          ),
+        )
+        .catch((error: unknown) => {
+          cancellation.signal.throwIfAborted()
+          if (error instanceof PreResponseTimeoutError) {
+            log.debug('pre-response-timeout', { reason: error.reason })
+            return waitPolicy.refusal?.() ?? preResponseTimeoutResponse()
+          }
+          throw error
+        })
         .then(
           async (response) => {
+            // Retain caller cancellation over the accepted response body;
+            // only the pre-response timer ends at accepted headers.
+            deadline.acceptTerminalResponse()
             // Overflow classification read a clone to EOF. Reuse that text
             // for redaction; safe diagnostics retain the original unread response.
             if (bufferedOverflow.has(response)) {
+              deadline.dispose()
               cancellation.release()
               return redactCredentialResponse(
                 response,
@@ -2719,17 +2803,20 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             )
             inFlight.add(retained.settled)
             void retained.settled.then(() => inFlight.delete(retained.settled))
+            void retained.settled.then(() => deadline.dispose())
             return redactCredentialResponse(
               preserveResponseMetadata(retained.response, response),
               [...selectedCredentials],
             )
           },
           (error: unknown) => {
+            deadline.dispose()
             cancellation.release()
             throw redactCredentialError(error, [...selectedCredentials])
           },
         )
         .catch((error: unknown) => {
+          deadline.dispose()
           cancellation.release()
           throw redactCredentialError(error, [...selectedCredentials])
         })

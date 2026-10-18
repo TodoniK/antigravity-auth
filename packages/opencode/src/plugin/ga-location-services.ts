@@ -1474,6 +1474,7 @@ export function createGaJobExecutor(
                 }
                 // The engine has prepared the body and bearer for this send,
                 // whether it is a warmup probe or the main request.
+                signal.throwIfAborted()
                 return send({
                   envelope: JSON.parse(init.body),
                   auth: { access: authorization.slice('Bearer '.length) },

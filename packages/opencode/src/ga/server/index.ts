@@ -266,6 +266,7 @@ export function createGaRawSender(
   if (send) return (input) => send(input)
   const observe = overrides.observeRawSenderSignal
   return (input) => {
+    input.signal.throwIfAborted()
     const transportOptions = {
       signal: input.signal,
       idleTimeoutMs: GA_RAW_IDLE_TIMEOUT_MS,

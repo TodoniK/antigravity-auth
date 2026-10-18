@@ -146,6 +146,10 @@ Some MCP servers have schemas incompatible with Antigravity's strict JSON format
 
 ## Rate Limits, Shadow Bans, and Hanging Prompts
 
+**Pre-response timeout:** A logical generation request has a fixed, provisional **10-minute limit** while seeking an accepted main response's headers. It includes credential/project preparation, account waits, warmups, and retries across endpoints/accounts; it is not a configurable setting. Expiry produces a native HTTP 412 (`FAILED_PRECONDITION`) with “Antigravity did not begin a response within the pre-response time limit. Check your connection and try again later.” Pi uses its native error event. Check your connection/proxy before trying a new request. Cancellation is not converted to this error.
+
+This is **not a first-visible-token guarantee**: after accepted main headers, the response body can keep streaming past ten minutes. An empty-response resend still uses the original deadline. Per-attempt header timers stay at 180 seconds, and body-idle watchdogs stay at 180 seconds in OpenCode 1/Pi and 300 seconds in GA. The separate cumulative no-eligible-account wait budget still resets on eligible selection; whichever limit expires first wins (quota policy wins a tie). A quota-wait value of `0` disables only that quota cap, not the fixed pre-response limit.
+
 **Symptoms:**
 - Prompts hang indefinitely (200 OK in logs but no response)
 - 403 "Permission Denied" errors even with fresh accounts
@@ -194,7 +198,7 @@ Users have reported success with this approach:
 - Use shorter sessions
 - Avoid parallel/retry-heavy workflows (e.g., spawning many subagents at once)
 - If using oh-my-opencode, consider reducing concurrent agent spawns
-- Lower `max_rate_limit_wait_seconds` to bound cumulative all-account waits (`0` disables the cap and waits indefinitely)
+- Lower `max_rate_limit_wait_seconds` to bound cumulative all-account waits (`0` disables only that quota-wait cap; the separate fixed ten-minute limit on seeking accepted main response headers still applies)
 
 </details>
 

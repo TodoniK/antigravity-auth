@@ -602,6 +602,8 @@ export async function fetchWithAgyCliTransport(
 
   try {
     options.signal?.addEventListener('abort', abort, { once: true })
+    // Cancellation may arrive after TLS resolves but before this listener exists.
+    options.signal?.throwIfAborted()
     socket.write(requestBytes)
     options.onDebug?.(
       `agy transport request dispatched (${requestBytes.byteLength} bytes)`,

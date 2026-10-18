@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   type AccountRepository,
-  initializeFreshAccountStore,
+  createAccountMigrationFactory,
   loadCommonAuthStoreModules,
   readAccountStoreBinding,
 } from '@cortexkit/antigravity-auth-core'
@@ -313,9 +313,26 @@ describe('GA location pool login', () => {
   it('refuses a pending migration without initialization or any file writes', async () => {
     const f = await fixture()
     try {
+      mkdirSync(join(f.root, 'resolved'), { recursive: true, mode: 0o700 })
+      writeFileSync(
+        f.legacyPath,
+        JSON.stringify({
+          version: 4,
+          accounts: [
+            {
+              refreshToken: 'pending-refresh',
+              addedAt: 1,
+              lastUsed: 2,
+            },
+          ],
+          activeIndex: 0,
+        }),
+        { mode: 0o600 },
+      )
       await expect(
-        initializeFreshAccountStore(f.modules, {
+        createAccountMigrationFactory(f.modules)({
           legacyPath: f.legacyPath,
+          offline: { processesStopped: true },
           now: Date.now,
           onBoundary: async (name) => {
             if (name === 'after-capture')

@@ -3318,7 +3318,7 @@ async function expectedFreshArtifacts(
     throw new AccountMigrationError('fresh generation setting differs')
 }
 
-/** Explicit fresh initialization publishes an owned pointer/journal before first login; pointer absence alone never authorizes credential service. */
+/** Publishes a complete empty generation, or validates and resumes an unfinished generation already named by the pointer. */
 export async function initializeFreshAccountStore(
   modules: AccountMigrationModules,
   options: FreshAccountStoreOptions,
@@ -3349,73 +3349,15 @@ export async function initializeFreshAccountStore(
             renew: true,
           },
           async (lease) => {
-            let journal = await readJournal(physical)
-            if (pointer === undefined) {
-              await options.onBoundary?.('before-capture')
-              await assertSourceAbsent(physical)
-              await modules.fs.withLock(
-                physical.legacyPath,
-                {
-                  name: 'accounts',
-                  ttlMs: 10_000,
-                  timeoutMs: 2_000,
-                  renew: true,
-                },
-                async (accountsLease) => {
-                  await assertSourceAbsent(physical)
-                  await accountsLease.assertOwned()
-                  await lease.assertOwned()
-                  if (
-                    journal !== undefined ||
-                    (await exists(physical.configPath)) ||
-                    (await exists(physical.statePath))
-                  )
-                    throw new AccountMigrationError(
-                      'fresh stage has unrelated artifacts',
-                    )
-                  journal = {
-                    schemaVersion: 1,
-                    id: pathGenerationId(physical),
-                    legacyPath: physical.legacyPath,
-                    storeDir: physical.storeDir,
-                    sourceKind: 'absent',
-                    status: 'pending',
-                    operation: 'migrate',
-                    phase: 'capture',
-                    manifest: {
-                      sourceVersion: null,
-                      normalizationClock: options.now(),
-                      accounts: [],
-                      routing: { schemaVersion: 1 },
-                      effectiveActiveIndex: 0,
-                    },
-                    mapping: [],
-                    completedRows: [],
-                  }
-                  await saveJournal(
-                    modules,
-                    physical,
-                    lease,
-                    journal,
-                    true,
-                    options.onBoundary,
-                  )
-                  await options.onBoundary?.('pointer:before-publication')
-                  await assertSourceAbsent(physical)
-                  await publishGenerationPointer(
-                    modules,
-                    physical,
-                    journal,
-                    parentLease,
-                    lease,
-                    undefined,
-                    options.onBoundary,
-                    lease,
-                  )
-                  await options.onBoundary?.('pointer:after-publication')
-                },
+            const journal = await readJournal(physical)
+            if (pointer === undefined)
+              return initializePrivateEmptyGeneration(
+                modules,
+                physical,
+                parentLease,
+                lease,
+                options,
               )
-            }
             if (
               journal?.sourceKind !== 'absent' ||
               journal.operation !== 'migrate' ||
@@ -3557,6 +3499,264 @@ export async function initializeFreshAccountStore(
   }
 }
 
+// These files are not reachable through a pointer yet. Their final barriers are
+// grouped immediately before publication, rather than at each construction step.
+async function exclusiveUnpublishedBytes(
+  path: string,
+  bytes: Buffer,
+): Promise<void> {
+  const handle = await open(
+    path,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW,
+    0o600,
+  )
+  try {
+    await handle.writeFile(bytes)
+  } finally {
+    await handle.close()
+  }
+  if (!(await secureRead(path)).equals(bytes))
+    throw new AccountMigrationError('private stage readback differs')
+}
+
+async function initializePrivateEmptyGeneration(
+  modules: AccountMigrationModules,
+  paths: AccountStorePaths,
+  parentLease: MigrationLease,
+  managementLease: MigrationLease,
+  options: FreshAccountStoreOptions,
+): Promise<AccountMigrationOutcome> {
+  return modules.fs.withLock(
+    paths.legacyPath,
+    { name: 'accounts', ttlMs: 10_000, timeoutMs: 2_000, renew: true },
+    async (accountsLease) => {
+      const directory = await lstat(paths.storeDir)
+      const assertOwned = async () => {
+        await parentLease.assertOwned()
+        await managementLease.assertOwned()
+        await accountsLease.assertOwned()
+        const current = await lstat(paths.storeDir)
+        if (
+          !current.isDirectory() ||
+          current.isSymbolicLink() ||
+          current.dev !== directory.dev ||
+          current.ino !== directory.ino ||
+          !sameFilesystemPath(await realpath(paths.storeDir), paths.storeDir)
+        )
+          throw new AccountMigrationError(
+            'private generation directory changed',
+          )
+        privateMode(current.mode, 0o700)
+      }
+      const boundary = options.onBoundary
+      await assertOwned()
+      await assertSourceAbsent(paths)
+      if (await readPointer(paths.legacyPath))
+        throw new AccountMigrationError(
+          'private initialization found a competing pointer',
+        )
+      if (
+        (await readJournal(paths)) ||
+        (await exists(paths.configPath)) ||
+        (await exists(paths.statePath))
+      )
+        throw new AccountMigrationError('fresh stage has unrelated artifacts')
+      const journal: AccountMigrationJournal = {
+        schemaVersion: 1,
+        id: pathGenerationId(paths),
+        legacyPath: paths.legacyPath,
+        storeDir: paths.storeDir,
+        sourceKind: 'absent',
+        status: 'pending',
+        operation: 'migrate',
+        phase: 'build',
+        manifest: {
+          sourceVersion: null,
+          normalizationClock: options.now(),
+          accounts: [],
+          routing: { schemaVersion: 1 },
+          effectiveActiveIndex: 0,
+        },
+        mapping: [],
+        completedRows: [],
+      }
+      await assertOwned()
+      await exclusiveUnpublishedBytes(
+        paths.configPath,
+        Buffer.from('{"version":1,"accounts":[]}\n'),
+      )
+      await boundary?.('empty-stage:after-seed')
+      const store = openMigrationStore(
+        modules,
+        paths,
+        options.now,
+        async (step, info) => {
+          await assertOwned()
+          if (!step.includes('config') || (await exists(paths.statePath)))
+            throw new AccountMigrationError(
+              'private empty stage attempted a credential write',
+            )
+          await secureRead(paths.configPath)
+          await boundary?.(`public:${info.operation}:${step}`)
+          await assertOwned()
+        },
+      )
+      await assertOwned()
+      await store.initialize()
+      await boundary?.('empty-stage:after-initialize')
+      await assertOwned()
+      await store.updateSettings((settings) => {
+        settings[ROUTING_SETTINGS_KEY] = encodeRoutingSettings(
+          journal.manifest.routing,
+        )
+        settings[ACCOUNT_STORE_GENERATION_SETTINGS_KEY] =
+          generationJson(journal)
+        settings[MANAGEMENT_SETTINGS_KEY] = {
+          id: journal.id,
+          kind: 'migration',
+          targets: [],
+          progress: { step: 'build', completedTargets: [] },
+        }
+        return settings
+      })
+      await boundary?.('empty-stage:after-build-settings')
+      await expectedFreshArtifacts(paths, journal)
+      await assertStateOwnership(paths, journal, true)
+      await verifyImported(store, journal)
+      // Preserve the historical verification input: the real, reopened build
+      // config includes management, unlike the final management-free config.
+      const snapshot = await secureRead(paths.configPath)
+      await verifyImported(store, journal)
+      journal.verification = {
+        manifestSha256: digest(canonical(manifestJson(journal.manifest))),
+        configSha256: digest(snapshot),
+        statePresent: false,
+        durability: accountMigrationDurability(),
+      }
+      await assertOwned()
+      await assertSourceAbsent(paths)
+      journal.sourceAbsenceVerified = true
+      await management(store, journal, true)
+      await boundary?.('empty-stage:after-clear-settings')
+      await expectedFreshArtifacts(paths, journal)
+      await currentSuccessor(store, paths, journal)
+      if ((await settingsOf(store))[MANAGEMENT_SETTINGS_KEY] !== undefined)
+        throw new AccountMigrationError(
+          'private stage still has management work',
+        )
+      journal.phase = 'activate'
+      journal.status = 'active'
+      decodeAccountMigrationJournal(journalJson(journal))
+      await assertOwned()
+      await exclusiveUnpublishedBytes(
+        paths.migrationPath,
+        Buffer.from(`${JSON.stringify(journalJson(journal), null, 2)}\n`),
+      )
+      await boundary?.('empty-stage:after-journal')
+      await syncFile(paths.configPath)
+      await boundary?.('empty-stage:after-config-sync')
+      await syncFile(paths.migrationPath)
+      await boundary?.('empty-stage:after-journal-sync')
+      for (const [name, path] of [
+        ['backups', paths.backupsDir],
+        ['retired', paths.retiredDir],
+        ['transfers', paths.transfersDir],
+      ] as const) {
+        await syncDirectory(path)
+        await boundary?.(`empty-stage:after-${name}-sync`)
+      }
+      await syncDirectory(paths.storeDir)
+      await boundary?.('empty-stage:after-generation-sync')
+      await boundary?.('pointer:before-publication')
+      const reopened = await readJournal(paths)
+      if (!isDeepStrictEqual(reopened, journal))
+        throw new AccountMigrationError(
+          'publication requires its complete synced canonical journal',
+        )
+      const pointer: AccountStorePointer = {
+        schemaVersion: 1,
+        id: journal.id,
+        directoryBasename: basename(paths.storeDir),
+      }
+      const path = accountStorePointerPath(paths.legacyPath)
+      const stage = `${path}.${journal.id}.tmp`
+      const bytes = Buffer.from(`${JSON.stringify(pointer, null, 2)}\n`)
+      await assertOwned()
+      let stageHandle: Awaited<ReturnType<typeof open>> | undefined
+      try {
+        stageHandle = await open(stage, 'wx', 0o600)
+      } catch (error) {
+        if (errno(error) !== 'EEXIST') throw error
+      }
+      if (stageHandle) {
+        try {
+          await stageHandle.writeFile(bytes)
+          await stageHandle.sync()
+        } finally {
+          await stageHandle.close()
+        }
+      }
+      if (!(await secureRead(stage)).equals(bytes))
+        throw new AccountMigrationError('exclusive pointer stage differs')
+      if (!stageHandle) await syncFile(stage)
+      await boundary?.('empty-stage:after-pointer-stage')
+      await syncDirectory(dirname(path))
+      await boundary?.('empty-stage:after-parent-prelink-sync')
+      await boundary?.('pointer:before-link')
+      await assertOwned()
+      await assertSourceAbsent(paths)
+      if (await exists(path))
+        throw new AccountMigrationError(
+          'foreign or competing pointer publication refuses overwrite',
+        )
+      if (await exists(resolveAccountStorePaths(paths.legacyPath).storeDir))
+        throw new AccountMigrationError(
+          'foreign logical store directory appeared before publication',
+        )
+      try {
+        await link(stage, path)
+      } catch (error) {
+        if (errno(error) === 'EEXIST')
+          throw new AccountMigrationError(
+            'foreign or competing pointer publication refuses overwrite',
+          )
+        throw new AccountMigrationError(
+          'exclusive pointer hard-link publication failed',
+        )
+      }
+      await boundary?.('pointer:after-link-before-parent-sync')
+      await syncDirectory(dirname(path))
+      if (
+        !isDeepStrictEqual(await readPointer(paths.legacyPath), pointer) ||
+        !isDeepStrictEqual(await readJournal(paths), journal)
+      )
+        throw new AccountMigrationError('pointer publication readback differs')
+      await expectedFreshArtifacts(paths, journal)
+      await currentSuccessor(store, paths, journal)
+      const admission = await readAccountStoreAdmission(
+        paths.legacyPath,
+        modules,
+        options.now,
+        journal.id,
+      )
+      if (
+        admission.status !== 'active' ||
+        !isDeepStrictEqual(admission.receipt, receipt(journal))
+      )
+        throw new AccountMigrationError(
+          'published empty generation is not admitted',
+        )
+      await boundary?.('pointer:after-sync-before-stage-cleanup')
+      await cleanupPointerStage(paths.legacyPath, pointer, parentLease)
+      await assertOwned()
+      return { status: 'completed', receipt: receipt(journal) }
+    },
+  )
+}
+
 async function allocateGeneration(
   legacyPath: string,
 ): Promise<AccountStorePaths> {
@@ -3590,8 +3790,8 @@ async function publishGenerationPointer(
     throw new AccountMigrationError(
       'publication requires its complete synced canonical journal',
     )
-  // Only the fresh initializer supplies its still-held lease after saveJournal
-  // returns. Other callers retain both barriers rather than infer a prior save.
+  // Callers without a still-held save-owner opt-in retain both barriers rather
+  // than infer that the canonical journal was persisted by an earlier operation.
   if (journalSavedBy !== managementLease) {
     await syncFile(paths.migrationPath)
     await syncDirectory(paths.storeDir)
@@ -3718,8 +3918,18 @@ async function finishPointerPublication(
   const path = accountStorePointerPath(legacyPath)
   await syncFile(path)
   await syncDirectory(dirname(path))
+  if (await cleanupPointerStage(legacyPath, pointer, lease))
+    await syncDirectory(dirname(path))
+}
+
+async function cleanupPointerStage(
+  legacyPath: string,
+  pointer: AccountStorePointer,
+  lease: MigrationLease,
+): Promise<boolean> {
+  const path = accountStorePointerPath(legacyPath)
   const stage = `${path}.${pointer.id}.tmp`
-  if (!(await exists(stage))) return
+  if (!(await exists(stage))) return false
   const bytes = await secureRead(stage)
   if (
     !isDeepStrictEqual(
@@ -3737,5 +3947,5 @@ async function finishPointerPublication(
     )
   await lease.assertOwned()
   await unlink(stage)
-  await syncDirectory(dirname(path))
+  return true
 }

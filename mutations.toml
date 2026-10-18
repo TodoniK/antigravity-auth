@@ -1592,3 +1592,42 @@ runner = "command"
 command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate packages/opencode/src/plugin/request.test.ts -t \"$1\"", "--", "{test}"]
 test_count_pattern = "Ran {count} test"
 expect_red = ['^request.ts\stransformAntigravityResponse\smasks\sproject\sIDs\sin\sfailed\srequest\stext$']
+
+[[control]]
+id = "shared-empty-stage-parent-before-link"
+guards = "The empty generation and pointer stage reach the parent barrier before exclusive publication, not only afterward."
+file = "packages/core/src/account-migration.ts"
+old = "      await syncDirectory(dirname(path))\n      await boundary?.('empty-stage:after-parent-prelink-sync')"
+new = "      // NON-VACUITY BREAK: defer the parent barrier until after the link.\n      await boundary?.('empty-stage:after-parent-prelink-sync')"
+test_file = "test/common-auth-010-store/pointer-durability.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^pointer\spublication\sdurability\spersists\sthe\sparent\sbefore\slinking\sa\sprivate\sempty\sgeneration$']
+
+[[control]]
+id = "shared-empty-stage-source-recheck"
+guards = "A source appearing at the last pre-link window refuses publication, not merely acknowledgment after publishing."
+file = "packages/core/src/account-migration.ts"
+old = "      await assertSourceAbsent(paths)\n      if (await exists(path))"
+new = "      // NON-VACUITY BREAK: skip the final source-absence recheck.\n      if (await exists(path))"
+test_file = "test/common-auth-010-store/pointer-durability.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^pointer\spublication\sdurability\srechecks\ssource\sabsence\simmediately\sbefore\sthe\sprivate\slink$']
+
+[[control]]
+id = "shared-empty-stage-support-syncs"
+guards = "All three empty support directories are persisted before the generation directory and pointer link."
+file = "packages/core/src/account-migration.ts"
+old = "        await syncDirectory(path)\n        await boundary?.(`empty-stage:after-${name}-sync`)"
+new = "        void path // NON-VACUITY BREAK: omit the support-directory barriers.\n        await boundary?.(`empty-stage:after-${name}-sync`)"
+test_file = "test/common-auth-010-store/pointer-durability.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^pointer\spublication\sdurability\spersists\sall\sempty\ssupport\sdirectories\sbefore\sthe\sgeneration\sand\slink$']

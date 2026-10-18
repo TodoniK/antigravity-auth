@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from 'bun:test'
+import * as crypto from 'node:crypto'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import { join } from 'node:path'
@@ -7,11 +8,18 @@ import {
   accountStorePointerPath,
   createAccountMigrationFactory,
   createAccountRollbackFactory,
+  decodeAccountMigrationJournal,
   initializeFreshAccountStore,
+  readAccountStoreAdmission,
+  resolveAccountStorePaths,
   resolvePublishedAccountStorePaths,
 } from '../../packages/core/src/account-migration.ts'
 import { loadCommonAuthStoreModules } from '../../packages/core/src/common-auth-runtime.ts'
-import { MIGRATION_SOURCE, withMigrationFixtures } from './migration-child.ts'
+import {
+  MIGRATION_SOURCE,
+  publishPendingFreshFixture,
+  withMigrationFixtures,
+} from './migration-child.ts'
 
 interface Event {
   kind:
@@ -86,6 +94,398 @@ async function stagePaths(legacyPath: string) {
 describe.skipIf(process.platform === 'win32')(
   'pointer publication durability',
   () => {
+    for (const owner of ['topology', 'management', 'accounts'] as const)
+      it(`returns pending after losing the private ${owner} lease without resetting residue`, async () => {
+        await withMigrationFixtures(async (create) => {
+          const fixture = await create()
+          await fs.unlink(fixture.legacyPath)
+          const modules = await loadCommonAuthStoreModules()
+          let configPath = ''
+          const result = await initializeFreshAccountStore(modules, {
+            legacyPath: fixture.legacyPath,
+            now: () => 100,
+            async onBoundary(point) {
+              if (point !== 'empty-stage:after-seed') return
+              const directory = (await fs.readdir(fixture.root)).find((name) =>
+                name.endsWith('.generation'),
+              )
+              if (!directory) throw new Error('private stage missing')
+              configPath = join(fixture.root, directory, 'config.json')
+              await fs.unlink(
+                modules.fs.lockPathFor(
+                  owner === 'management' ? configPath : fixture.legacyPath,
+                  owner === 'accounts' ? 'accounts' : 'antigravity-management',
+                ),
+              )
+            },
+          })
+          expect(result).toEqual({
+            status: 'pending',
+            reason: 'ownership-lost',
+          })
+          expect(await fs.readFile(configPath, 'utf8')).toBe(
+            '{"version":1,"accounts":[]}\n',
+          )
+          await expect(
+            fs.lstat(accountStorePointerPath(fixture.legacyPath)),
+          ).rejects.toMatchObject({ code: 'ENOENT' })
+        })
+      })
+
+    it('returns contention to a racing initializer while the winner holds its leases', async () => {
+      await withMigrationFixtures(async (create) => {
+        const fixture = await create()
+        await fs.unlink(fixture.legacyPath)
+        const modules = await loadCommonAuthStoreModules()
+        let release!: () => void
+        let entered!: () => void
+        const held = new Promise<void>((resolve) => {
+          release = resolve
+        })
+        const started = new Promise<void>((resolve) => {
+          entered = resolve
+        })
+        const winner = initializeFreshAccountStore(modules, {
+          legacyPath: fixture.legacyPath,
+          now: () => 100,
+          async onBoundary(point) {
+            if (point === 'empty-stage:after-seed') {
+              entered()
+              await held
+            }
+          },
+        })
+        try {
+          await started
+          expect(
+            await initializeFreshAccountStore(modules, {
+              legacyPath: fixture.legacyPath,
+              now: () => 100,
+            }),
+          ).toEqual({ status: 'pending', reason: 'lock-contention' })
+        } finally {
+          release()
+        }
+        expect((await winner).status).toBe('completed')
+        expect(
+          (
+            await readAccountStoreAdmission(
+              fixture.legacyPath,
+              modules,
+              () => 100,
+            )
+          ).status,
+        ).toBe('active')
+        expect(
+          (await fs.readdir(fixture.root)).filter((name) =>
+            name.endsWith('.generation'),
+          ),
+        ).toHaveLength(1)
+      })
+    })
+
+    it('persists the parent before linking a private empty generation', async () => {
+      await withMigrationFixtures(async (create) => {
+        const fixture = await create()
+        await fs.unlink(fixture.legacyPath)
+        const modules = await loadCommonAuthStoreModules()
+        await observe(async (events) => {
+          await initializeFreshAccountStore(modules, {
+            legacyPath: fixture.legacyPath,
+            now: () => 100,
+          })
+          const linked = events.findIndex((e) => e.kind === 'link')
+          const parent = events.findIndex(
+            (e) => e.kind === 'directory-sync' && e.path === fixture.root,
+          )
+          expect(parent).toBeGreaterThan(-1)
+          expect(parent).toBeLessThan(linked)
+          expect(
+            events.filter(
+              (e) => e.kind === 'directory-sync' && e.path === fixture.root,
+            ),
+          ).toHaveLength(2)
+        })
+      })
+    })
+
+    it('rechecks source absence immediately before the private link', async () => {
+      await withMigrationFixtures(async (create) => {
+        const fixture = await create()
+        await fs.unlink(fixture.legacyPath)
+        const modules = await loadCommonAuthStoreModules()
+        await observe(async (events) => {
+          await expect(
+            initializeFreshAccountStore(modules, {
+              legacyPath: fixture.legacyPath,
+              now: () => 100,
+              async onBoundary(point) {
+                if (point === 'pointer:before-link')
+                  await fs.writeFile(
+                    fixture.legacyPath,
+                    'appearing legacy source',
+                    { flag: 'wx', mode: 0o600 },
+                  )
+              },
+            }),
+          ).rejects.toThrow()
+          expect(events.filter((e) => e.kind === 'link')).toHaveLength(0)
+          await expect(
+            fs.lstat(accountStorePointerPath(fixture.legacyPath)),
+          ).rejects.toMatchObject({ code: 'ENOENT' })
+          expect(await fs.readFile(fixture.legacyPath, 'utf8')).toBe(
+            'appearing legacy source',
+          )
+        })
+      })
+    })
+
+    it('persists all empty support directories before the generation and link', async () => {
+      await withMigrationFixtures(async (create) => {
+        const fixture = await create()
+        await fs.unlink(fixture.legacyPath)
+        const modules = await loadCommonAuthStoreModules()
+        await observe(async (events) => {
+          await initializeFreshAccountStore(modules, {
+            legacyPath: fixture.legacyPath,
+            now: () => 100,
+          })
+          const paths = await resolvePublishedAccountStorePaths(
+            fixture.legacyPath,
+          )
+          if (!paths) throw new Error('missing published generation')
+          expect(
+            events.filter(
+              (e) =>
+                e.kind === 'file-sync' ||
+                e.kind === 'directory-sync' ||
+                e.kind === 'link',
+            ),
+          ).toEqual([
+            { kind: 'file-sync', path: paths.configPath },
+            { kind: 'file-sync', path: paths.migrationPath },
+            ...[
+              paths.backupsDir,
+              paths.retiredDir,
+              paths.transfersDir,
+              paths.storeDir,
+            ].map((path) => ({ kind: 'directory-sync' as const, path })),
+            {
+              kind: 'file-sync',
+              path: `${accountStorePointerPath(fixture.legacyPath)}.${JSON.parse(await fs.readFile(paths.migrationPath, 'utf8')).id}.tmp`,
+            },
+            { kind: 'directory-sync', path: fixture.root },
+            { kind: 'link', path: accountStorePointerPath(fixture.legacyPath) },
+            { kind: 'directory-sync', path: fixture.root },
+          ])
+        })
+      })
+    })
+
+    it('preserves independently encoded old-path bytes and historical digest inputs', async () => {
+      await withMigrationFixtures(async (create) => {
+        const fixture = await create()
+        await fs.unlink(fixture.legacyPath)
+        const id = '00000000-0000-4000-8000-000000000091'
+        const uuid = spyOn(crypto, 'randomUUID').mockReturnValue(id)
+        const modules = await loadCommonAuthStoreModules()
+        const paths = resolveAccountStorePaths(fixture.legacyPath, id)
+        const sha = (bytes: string | Buffer) =>
+          createHash('sha256').update(bytes).digest('hex')
+        // Literal sorted manifest is independent of the adapter's canonical encoder.
+        const manifestInput =
+          '{"accounts":[],"effectiveActiveIndex":0,"normalizationClock":100,"routing":{"schemaVersion":1},"sourceVersion":null}'
+        const generation = {
+          schemaVersion: 1,
+          id,
+          legacyPath: fixture.legacyPath,
+          storeDir: paths.storeDir,
+          sourceKind: 'absent',
+          initialManifestSha256: sha(manifestInput),
+        }
+        const config = {
+          version: 1,
+          accounts: [],
+          commonAuthPool: { schemaVersion: 1, rows: {} },
+          antigravityRouting: { schemaVersion: 1 },
+          antigravityGeneration: generation,
+        }
+        const encode = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`
+        const buildBytes = encode({
+          ...config,
+          antigravityManagement: {
+            id,
+            kind: 'migration',
+            targets: [],
+            progress: { step: 'build', completedTargets: [] },
+          },
+        })
+        let historical: Buffer | undefined
+        try {
+          await publishPendingFreshFixture(modules, fixture.legacyPath)
+          let oldHistorical: Buffer | undefined
+          const oldResult = await initializeFreshAccountStore(modules, {
+            legacyPath: fixture.legacyPath,
+            now: () => 100,
+            async onBoundary(point) {
+              if (point === 'before-verify')
+                oldHistorical = await fs.readFile(paths.configPath)
+            },
+          })
+          const oldConfig = await fs.readFile(paths.configPath)
+          const oldJournal = decodeAccountMigrationJournal(
+            JSON.parse(await fs.readFile(paths.migrationPath, 'utf8')),
+          )
+          const oldPointer = await fs.readFile(
+            accountStorePointerPath(fixture.legacyPath),
+          )
+          expect(oldHistorical?.toString()).toBe(buildBytes)
+          await fs.unlink(accountStorePointerPath(fixture.legacyPath))
+          await fs.rm(paths.storeDir, { recursive: true })
+          const result = await initializeFreshAccountStore(modules, {
+            legacyPath: fixture.legacyPath,
+            now: () => 100,
+            async onBoundary(point) {
+              if (point === 'empty-stage:after-build-settings')
+                historical = await fs.readFile(paths.configPath)
+            },
+          })
+          expect(historical).toEqual(oldHistorical)
+          expect(await fs.readFile(paths.configPath)).toEqual(oldConfig)
+          expect(
+            decodeAccountMigrationJournal(
+              JSON.parse(await fs.readFile(paths.migrationPath, 'utf8')),
+            ),
+          ).toEqual(oldJournal)
+          expect(
+            await fs.readFile(accountStorePointerPath(fixture.legacyPath)),
+          ).toEqual(oldPointer)
+          expect(result).toEqual(oldResult)
+          expect(historical?.toString()).toBe(buildBytes)
+          expect(await fs.readFile(paths.configPath, 'utf8')).toBe(
+            encode(config),
+          )
+          expect(result).toEqual({
+            status: 'completed',
+            receipt: {
+              id,
+              status: 'active',
+              legacyPath: fixture.legacyPath,
+              storeDir: paths.storeDir,
+              sourceKind: 'absent',
+              durability: 'posix-directory-synced',
+              restartRequired: false,
+            },
+          })
+          expect(
+            decodeAccountMigrationJournal(
+              JSON.parse(await fs.readFile(paths.migrationPath, 'utf8')),
+            ),
+          ).toEqual({
+            schemaVersion: 1,
+            id,
+            legacyPath: fixture.legacyPath,
+            storeDir: paths.storeDir,
+            sourceKind: 'absent',
+            status: 'active',
+            operation: 'migrate',
+            phase: 'activate',
+            manifest: {
+              sourceVersion: null,
+              normalizationClock: 100,
+              accounts: [],
+              routing: { schemaVersion: 1 },
+              effectiveActiveIndex: 0,
+            },
+            mapping: [],
+            completedRows: [],
+            sourceAbsenceVerified: true,
+            verification: {
+              manifestSha256: sha(manifestInput),
+              configSha256: sha(buildBytes),
+              statePresent: false,
+              durability: 'posix-directory-synced',
+            },
+          })
+          expect(sha(buildBytes)).not.toBe(sha(encode(config)))
+          expect(
+            await fs.readFile(
+              accountStorePointerPath(fixture.legacyPath),
+              'utf8',
+            ),
+          ).toBe(
+            encode({
+              schemaVersion: 1,
+              id,
+              directoryBasename: paths.storeDir.split('/').at(-1),
+            }),
+          )
+          expect((await fs.readdir(paths.storeDir)).sort()).toEqual([
+            'backups',
+            'config.json',
+            'migration.json',
+            'retired',
+            'transfers',
+          ])
+          for (const path of [
+            paths.backupsDir,
+            paths.retiredDir,
+            paths.transfersDir,
+          ]) {
+            expect(await fs.readdir(path)).toEqual([])
+            expect((await fs.lstat(path)).mode & 0o777).toBe(0o700)
+          }
+          expect((await fs.lstat(paths.configPath)).mode & 0o777).toBe(0o600)
+          expect((await fs.lstat(paths.migrationPath)).mode & 0o777).toBe(0o600)
+        } finally {
+          uuid.mockRestore()
+        }
+      })
+    })
+
+    for (let failedSync = 1; failedSync <= 9; failedSync++)
+      it(`refuses acknowledgment when final barrier ${failedSync} fails`, async () => {
+        await withMigrationFixtures(async (create) => {
+          const fixture = await create()
+          await fs.unlink(fixture.legacyPath)
+          const modules = await loadCommonAuthStoreModules()
+          const actualOpen = fs.open
+          let syncs = 0
+          const opened = spyOn(fs, 'open').mockImplementation(
+            async (...args) => {
+              const handle = await actualOpen(...args)
+              const sync = handle.sync.bind(handle)
+              handle.sync = async () => {
+                if (++syncs === failedSync)
+                  throw new Error('injected final barrier failure')
+                await sync()
+              }
+              return handle
+            },
+          )
+          try {
+            await expect(
+              initializeFreshAccountStore(modules, {
+                legacyPath: fixture.legacyPath,
+                now: () => 100,
+              }),
+            ).rejects.toThrow('injected final barrier failure')
+            expect(syncs).toBe(failedSync)
+            expect(
+              (
+                await readAccountStoreAdmission(
+                  fixture.legacyPath,
+                  modules,
+                  () => 100,
+                )
+              ).status,
+            ).toBe(failedSync === 9 ? 'active' : 'initialization-required')
+          } finally {
+            opened.mockRestore()
+          }
+        })
+      })
+
     it('measures clean empty initialization with the embedded store', async () => {
       await withMigrationFixtures(async (create) => {
         const fixture = await create()
@@ -107,16 +507,18 @@ describe.skipIf(process.platform === 'win32')(
             directory: counts('directory-sync'),
             locks: counts('lock'),
             renames: counts('rename'),
+            links: counts('link'),
           }
           console.info(
             'empty initialization delegated filesystem counts',
             measured,
           )
           expect(measured).toEqual({
-            file: 24,
-            directory: 17,
-            locks: 18,
-            renames: 13,
+            file: 3,
+            directory: 6,
+            locks: 9,
+            renames: 3,
+            links: 1,
           })
           const start = events.findIndex(
             (event) => event.kind === 'pointer-create',
@@ -138,24 +540,33 @@ describe.skipIf(process.platform === 'win32')(
     it('syncs a validated reused pointer stage before linking', async () => {
       await withMigrationFixtures(async (create) => {
         const fixture = await create()
-        await fs.unlink(fixture.legacyPath)
         const modules = await loadCommonAuthStoreModules()
         let stage = ''
+        const guarded: AccountMigrationModules = {
+          ...modules,
+          fs: {
+            ...modules.fs,
+            async writeJsonAtomic(path, value, options) {
+              await modules.fs.writeJsonAtomic(path, value, options)
+              if (!stage && path.endsWith('/migration.json')) {
+                const paths = await stagePaths(fixture.legacyPath)
+                stage = paths.stage
+                await fs.writeFile(stage, paths.bytes, {
+                  mode: 0o600,
+                  flag: 'wx',
+                })
+              }
+            },
+          },
+        }
         await observe(async (events) => {
           expect(
             (
-              await initializeFreshAccountStore(modules, {
+              await createAccountMigrationFactory(guarded)({
                 legacyPath: fixture.legacyPath,
+                offline: { processesStopped: true },
                 now: () => 100,
                 async onBoundary(point) {
-                  if (point === 'pointer:before-publication') {
-                    const paths = await stagePaths(fixture.legacyPath)
-                    stage = paths.stage
-                    await fs.writeFile(stage, paths.bytes, {
-                      mode: 0o600,
-                      flag: 'wx',
-                    })
-                  }
                   if (point === 'pointer:before-link') {
                     expect(
                       events.filter(
@@ -163,7 +574,7 @@ describe.skipIf(process.platform === 'win32')(
                       ),
                     ).toHaveLength(1)
                     expect(events.at(-1)).toEqual({
-                      kind: 'directory-sync',
+                      kind: 'directory-sync' as const,
                       path: fixture.root,
                     })
                   }
@@ -251,7 +662,7 @@ describe.skipIf(process.platform === 'win32')(
         })
       })
 
-    for (const owner of ['management', 'topology'] as const)
+    for (const owner of ['management', 'topology', 'accounts'] as const)
       it(`asserts ${owner} ownership even after an owned save`, async () => {
         await withMigrationFixtures(async (create) => {
           const fixture = await create()
@@ -268,13 +679,16 @@ describe.skipIf(process.platform === 'win32')(
                     async assertOwned() {
                       await lease.assertOwned()
                       const selected =
-                        owner === 'topology'
+                        owner !== 'management'
                           ? path === fixture.legacyPath
                           : path.endsWith('/config.json')
                       if (
                         lose &&
                         selected &&
-                        options.name === 'antigravity-management'
+                        options.name ===
+                          (owner === 'accounts'
+                            ? 'accounts'
+                            : 'antigravity-management')
                       )
                         throw new Error('synthetic lost publication lease')
                     },

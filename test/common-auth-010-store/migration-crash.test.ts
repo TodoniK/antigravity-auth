@@ -27,6 +27,7 @@ import {
   readAccountStoreAdmission,
   readAccountStoreBinding,
 } from '../../packages/core/src/account-migration.ts'
+import { createAccountRepositoryFactory } from '../../packages/core/src/account-repository.ts'
 import {
   isValidProviderState,
   providerStateCredentialBound,
@@ -39,6 +40,7 @@ import {
   saveAccountStorage,
   saveAccountStorageReplace,
 } from '../../packages/core/src/account-storage.ts'
+import { loadCommonAuthStoreModules } from '../../packages/core/src/common-auth-runtime.ts'
 import { createDefaultAccountStoreOperations } from '../../packages/opencode/src/cli.ts'
 import { openAccountStore } from '../../packages/opencode/src/plugin/storage.ts'
 import {
@@ -54,6 +56,7 @@ import {
   migrationChildEnvironment,
   migrationFixtureInputs,
   preparePublicMigrationConsumer,
+  publishPendingFreshFixture,
   resolvedConsumerPath,
   resolvePublicMigrationConsumer,
   withMigrationFixtures,
@@ -198,7 +201,7 @@ function captureChildOutput(
 async function crashOwnedChild(
   fixture: MigrationFixture,
   boundary: string,
-  operation: 'migrate' | 'rollback' | 'initialize',
+  operation: 'migrate' | 'rollback' | 'initialize' | 'initialize-resume',
   inputs: MigrationFixtureInputs,
 ): Promise<ChildLockClaim[]> {
   // Copy and verify inputs before spawning; the child's fixed execution budget
@@ -348,12 +351,17 @@ async function crashOwnedChild(
         'child output was not complete within the byte and finish bounds',
       ),
     )
-  const preClaim = operation === 'initialize' && boundary === 'before-capture'
+  const preClaim =
+    operation === 'initialize-resume' && boundary === 'before-capture'
   if (
     !reaped ||
     !owned ||
     !crashed ||
-    child.exitCode !== (boundary.startsWith('pointer-dedup:') ? 91 : 73) ||
+    child.exitCode !==
+      (boundary.startsWith('pointer-dedup:') ||
+      boundary.startsWith('private-stage:')
+        ? 91
+        : 73) ||
     timedOut ||
     (!claims.length && !preClaim)
   )
@@ -462,6 +470,167 @@ describe('owned real-process migration crash seams', () => {
     }
   }
 
+  integrationIt(
+    'migrates a later real legacy source instead of adopting an abandoned empty stage',
+    async (create, modules, inputs) => {
+      const fixture = await create()
+      await unlink(fixture.legacyPath)
+      await crashOwnedChild(
+        fixture,
+        'private-stage:empty-stage:after-journal',
+        'initialize',
+        inputs,
+      )
+      const abandoned = (await readdir(fixture.root)).filter((name) =>
+        name.endsWith('.generation'),
+      )
+      await writeFile(fixture.legacyPath, JSON.stringify(MIGRATION_SOURCE), {
+        mode: 0o600,
+        flag: 'wx',
+      })
+      const result = await createAccountMigrationFactory(modules)(
+        options(fixture),
+      )
+      expect(result.status).toBe('completed')
+      if (result.status !== 'completed')
+        throw new Error('legacy migration incomplete')
+      expect(result.receipt.sourceKind).toBe('file')
+      expect(result.receipt.storeDir.endsWith(abandoned[0]!)).toBe(false)
+      expect(
+        (await lstat(join(fixture.root, abandoned[0]!))).isDirectory(),
+      ).toBe(true)
+      await assertCurrentStoreRows(
+        fixtureStore(modules, fixture.legacyPath),
+        MIGRATION_SOURCE,
+      )
+    },
+  )
+
+  integrationIt(
+    'new empty publication still refuses rollback over a recreated legacy file',
+    async (create, modules) => {
+      const fixture = await create()
+      await unlink(fixture.legacyPath)
+      await initializeFreshAccountStore(modules, {
+        legacyPath: fixture.legacyPath,
+        now: Date.now,
+      })
+      await writeFile(fixture.legacyPath, JSON.stringify(MIGRATION_SOURCE), {
+        mode: 0o600,
+        flag: 'wx',
+      })
+      await expect(
+        createAccountRollbackFactory(modules)(options(fixture)),
+      ).rejects.toThrow(
+        'rollback refuses an existing or recreated legacy source',
+      )
+      expect(JSON.parse(await readFile(fixture.legacyPath, 'utf8'))).toEqual(
+        MIGRATION_SOURCE,
+      )
+      await expect(
+        createAccountMigrationFactory(modules)(options(fixture)),
+      ).rejects.toThrow('legacy source was recreated')
+    },
+  )
+
+  for (const cut of [
+    'empty-stage:after-seed',
+    'empty-stage:after-initialize',
+    'empty-stage:after-build-settings',
+    'empty-stage:after-clear-settings',
+    'empty-stage:after-journal',
+    'empty-stage:after-config-sync',
+    'empty-stage:after-journal-sync',
+    'empty-stage:after-backups-sync',
+    'empty-stage:after-retired-sync',
+    'empty-stage:after-transfers-sync',
+    'empty-stage:after-generation-sync',
+    'empty-stage:after-pointer-stage',
+    'empty-stage:after-parent-prelink-sync',
+    'pointer:before-link',
+    'pointer:after-link-before-parent-sync',
+    'pointer:after-sync-before-stage-cleanup',
+  ])
+    integrationIt(
+      `private empty stage is absent or active after exit-91 ${cut}`,
+      async (create, modules, inputs) => {
+        const fixture = await create()
+        await unlink(fixture.legacyPath)
+        await crashOwnedChild(
+          fixture,
+          `private-stage:${cut}`,
+          'initialize',
+          inputs,
+        )
+        const linked = cut.startsWith('pointer:after-')
+        expect(
+          (await readAccountStoreBinding(fixture.legacyPath, modules, Date.now))
+            .status,
+        ).toBe(linked ? 'bound' : 'initialization-required')
+        expect(
+          (
+            await readAccountStoreAdmission(
+              fixture.legacyPath,
+              modules,
+              Date.now,
+            )
+          ).status,
+        ).toBe(linked ? 'active' : 'initialization-required')
+        const cli = await createDefaultAccountStoreOperations().read(
+          fixture.legacyPath,
+        )
+        expect(cli.kind).toBe(linked ? 'store' : 'uninitialized')
+        if (cli.kind === 'store') expect(cli.accounts).toEqual([])
+        expect(
+          (
+            await openAccountStore({
+              legacyPath: fixture.legacyPath,
+              modules,
+              createRepository: createAccountRepositoryFactory(
+                await loadCommonAuthStoreModules(),
+              ),
+              exchange: async () => {
+                throw new Error('empty store cannot refresh')
+              },
+            })
+          ).status,
+        ).toBe(linked ? 'ready' : 'initialization-required')
+        const abandoned = (await readdir(fixture.root)).filter((name) =>
+          name.endsWith('.generation'),
+        )
+        expect(abandoned).toHaveLength(1)
+        const result = await initializeFreshAccountStore(modules, {
+          legacyPath: fixture.legacyPath,
+          now: Date.now,
+        })
+        expect(result.status).toBe('completed')
+        if (result.status !== 'completed') throw new Error('retry incomplete')
+        expect(result.receipt.storeDir.endsWith(abandoned[0]!)).toBe(linked)
+        for (const name of abandoned)
+          expect((await lstat(join(fixture.root, name))).isDirectory()).toBe(
+            true,
+          )
+        expect(
+          (await readdir(fixture.root)).filter((name) =>
+            name.endsWith('.generation'),
+          ),
+        ).toHaveLength(linked ? 1 : 2)
+        expect(
+          (
+            await readAccountStoreAdmission(
+              fixture.legacyPath,
+              modules,
+              Date.now,
+            )
+          ).status,
+        ).toBe('active')
+        const rows = await fixtureStore(modules, fixture.legacyPath).read()
+        expect(rows.status).toBe('ready')
+        if (rows.status !== 'ready') throw new Error('retry store unavailable')
+        expect(rows.rows).toEqual([])
+      },
+    )
+
   for (const boundary of [
     'pointer-dedup:before-resync',
     'pointer-dedup:before-stage',
@@ -474,7 +643,7 @@ describe('owned real-process migration crash seams', () => {
       async (create, modules, inputs) => {
         const fixture = await create(MIGRATION_SOURCE)
         await unlink(fixture.legacyPath)
-        await crashOwnedChild(fixture, boundary, 'initialize', inputs)
+        await crashOwnedChild(fixture, boundary, 'initialize-resume', inputs)
         const linked = boundary === 'pointer-dedup:after-link'
         const expected = linked ? 'pending' : 'initialization-required'
         const binding = await readAccountStoreBinding(
@@ -671,11 +840,19 @@ describe('owned real-process migration crash seams', () => {
       async (create, modules, inputs) => {
         const fixture = await create(MIGRATION_SOURCE)
         await unlink(fixture.legacyPath)
-        await crashOwnedChild(fixture, boundary, 'initialize', inputs)
+        await crashOwnedChild(fixture, boundary, 'initialize-resume', inputs)
+        const pointedBefore =
+          boundary === 'before-capture'
+            ? undefined
+            : await readFile(accountStorePointerPath(fixture.legacyPath))
         const request = { legacyPath: fixture.legacyPath, now: Date.now }
         expect(
           (await initializeFreshAccountStore(modules, request)).status,
         ).toBe('completed')
+        if (pointedBefore)
+          expect(
+            await readFile(accountStorePointerPath(fixture.legacyPath)),
+          ).toEqual(pointedBefore)
         expect(
           (
             await readAccountStoreAdmission(
@@ -1449,18 +1626,26 @@ describe('genuine public-store offline migration', () => {
         async (fixture, modules) => {
           const f = await fixture()
           await unlink(f.legacyPath)
+          const onBoundary = async (point: string) => {
+            if (point === `${side}-${phase}`)
+              await writeFile(f.legacyPath, 'foreign appearing source', {
+                mode: 0o600,
+                flag: 'wx',
+              })
+          }
           await expect(
-            initializeFreshAccountStore(modules, {
-              legacyPath: f.legacyPath,
-              now: Date.now,
-              onBoundary: async (point) => {
-                if (point === `${side}-${phase}`)
-                  await writeFile(f.legacyPath, 'foreign appearing source', {
-                    mode: 0o600,
-                    flag: 'wx',
-                  })
-              },
-            }),
+            (async () => {
+              await publishPendingFreshFixture(
+                modules,
+                f.legacyPath,
+                onBoundary,
+              )
+              return initializeFreshAccountStore(modules, {
+                legacyPath: f.legacyPath,
+                now: Date.now,
+                onBoundary,
+              })
+            })(),
           ).rejects.toThrow('existing or appearing legacy source')
           expect(await readFile(f.legacyPath, 'utf8')).toBe(
             'foreign appearing source',

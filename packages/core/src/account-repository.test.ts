@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { publishPendingFreshFixture } from '../../../test/common-auth-010-store/migration-child.ts'
 import {
   admitPublicConsumer,
   PUBLIC_CONSUMER_ENV,
@@ -3212,21 +3213,9 @@ describe('account-store generation binding on the genuine public store', () => {
       const admitted = await admittedStore()
       await withDir(async (dir) => {
         const legacyPath = join(dir, 'antigravity-accounts.json')
-        // The initializer stops right after publishing its pending
-        // generation, through its own boundary hook.
-        const stopped = await initializeFreshAccountStore(admitted.migration, {
-          legacyPath,
-          now: () => Date.now(),
-          onBoundary: (boundary) => {
-            if (boundary === 'pointer:after-publication') {
-              throw new Error('stopped after publishing the pointer')
-            }
-          },
-        }).then(
-          () => 'completed',
-          (error: unknown) => (error instanceof Error ? error.message : ''),
-        )
-        expect(stopped).not.toBe('completed')
+        // Older initializers published before building the native config. Keep
+        // refusing those unfinished generations even though new setup is private.
+        await publishPendingFreshFixture(admitted.migration, legacyPath)
         const binding = await readAccountStoreBinding(
           legacyPath,
           { store: admitted.module },

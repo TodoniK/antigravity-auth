@@ -31,11 +31,13 @@ import {
 import { admitLegacyWriter } from '../../packages/core/src/__fixtures__/legacy-writer.test.ts'
 import {
   type AccountMigrationModules,
+  accountStorePointerPath,
   createAccountMigrationFactory,
   createAccountRollbackFactory,
   decodeAccountMigrationJournal,
   initializeFreshAccountStore,
   type MigrationPoolStore,
+  resolveAccountStorePaths,
   resolvePublishedAccountStorePaths,
 } from '../../packages/core/src/account-migration.ts'
 import {
@@ -677,6 +679,86 @@ async function send(message: unknown): Promise<void> {
   )
 }
 
+// Reproduce the former first claim, which published a capture journal before
+// building native config. Resume tests must keep exercising that disk format,
+// not merely retry the new, already-complete private-stage publication.
+export async function publishPendingFreshFixture(
+  modules: AccountMigrationModules,
+  legacyPath: string,
+  boundary?: (point: string) => void | Promise<void>,
+): Promise<void> {
+  const lock = {
+    name: 'antigravity-management',
+    ttlMs: 10_000,
+    timeoutMs: 2_000,
+    renew: true,
+  }
+  await modules.fs.withLock(legacyPath, lock, async () => {
+    const id = randomUUID()
+    const paths = resolveAccountStorePaths(legacyPath, id)
+    for (const path of [
+      paths.storeDir,
+      paths.backupsDir,
+      paths.retiredDir,
+      paths.transfersDir,
+    ])
+      await mkdir(path, { mode: 0o700 })
+    await modules.fs.withLock(paths.configPath, lock, async () => {
+      await boundary?.('before-capture')
+      await modules.fs.withLock(
+        legacyPath,
+        { ...lock, name: 'accounts' },
+        async () => {
+          await modules.fs.writeJsonAtomic(paths.migrationPath, {
+            schemaVersion: 1,
+            id,
+            legacyPath,
+            storeDir: paths.storeDir,
+            sourceKind: 'absent',
+            status: 'pending',
+            operation: 'migrate',
+            phase: 'capture',
+            manifest: {
+              sourceVersion: null,
+              normalizationClock: 100,
+              accounts: [],
+              routing: { schemaVersion: 1 },
+              effectiveActiveIndex: 0,
+            },
+            mapping: [],
+            completedRows: [],
+          })
+          await boundary?.('pointer:before-publication')
+          const path = accountStorePointerPath(legacyPath)
+          const stage = `${path}.${id}.tmp`
+          const handle = await open(stage, 'wx', 0o600)
+          try {
+            await handle.writeFile(
+              `${JSON.stringify({ schemaVersion: 1, id, directoryBasename: basename(paths.storeDir) }, null, 2)}\n`,
+            )
+            await handle.sync()
+          } finally {
+            await handle.close()
+          }
+          await boundary?.('pointer:before-link')
+          await observedFs.link(stage, path)
+          await boundary?.('pointer:after-link-before-parent-sync')
+          if (process.platform !== 'win32') {
+            const parent = await open(dirname(path), 'r')
+            try {
+              await parent.sync()
+            } finally {
+              await parent.close()
+            }
+          }
+          await boundary?.('pointer:after-sync-before-stage-cleanup')
+          await observedFs.unlink(stage)
+        },
+      )
+    })
+  })
+}
+
 async function runChild(): Promise<void> {
   const [flag, root, nonce, boundary, operation] = process.argv.slice(2)
   if (
@@ -686,7 +768,8 @@ async function runChild(): Promise<void> {
     !boundary ||
     (operation !== 'migrate' &&
       operation !== 'rollback' &&
-      operation !== 'initialize')
+      operation !== 'initialize' &&
+      operation !== 'initialize-resume')
   )
     throw new Error('invalid migration child invocation')
   await assertDisposableChildRoot(root, nonce, process.ppid, process.env)
@@ -727,7 +810,12 @@ async function runChild(): Promise<void> {
         locks: await lockClaims(root),
       })
       // Only the owning parent may clean these leases after observing exit.
-      process.exit(boundary.startsWith('pointer-dedup:') ? 91 : 73)
+      process.exit(
+        boundary.startsWith('pointer-dedup:') ||
+          boundary.startsWith('private-stage:')
+          ? 91
+          : 73,
+      )
     }
     if (boundary.startsWith('pointer-dedup:')) {
       const actualOpen = observedFs.open
@@ -811,15 +899,23 @@ async function runChild(): Promise<void> {
         'pointer-dedup:before-link': 'pointer:before-link',
         'pointer-dedup:after-link': 'pointer:after-link-before-parent-sync',
       }[boundary]
-      if (point === boundary || point === pointerCut) await crash(boundary)
+      if (
+        point === boundary ||
+        point === pointerCut ||
+        (boundary.startsWith('private-stage:') &&
+          point === boundary.slice('private-stage:'.length))
+      )
+        await crash(boundary)
     }
     const input = {
       legacyPath: join(root, 'accounts.json'),
       now: Date.now,
       onBoundary,
     }
+    if (operation === 'initialize-resume')
+      await publishPendingFreshFixture(modules, input.legacyPath, onBoundary)
     const result =
-      operation === 'initialize'
+      operation === 'initialize' || operation === 'initialize-resume'
         ? await initializeFreshAccountStore(modules, input)
         : await (operation === 'migrate'
             ? createAccountMigrationFactory(modules)

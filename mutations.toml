@@ -17,6 +17,19 @@
 # catalogued here; .github/workflows/windows-migration.yml remains its platform gate.
 
 [[control]]
+id = "native-inert-record-rejects-failed-gate"
+guards = "A failed native-inert gate cannot mint a release record."
+file = "scripts/native-inert-result.ts"
+old = "  if (result.pass !== true) throw new Error('native-inert gate did not pass')"
+new = "  // NON-VACUITY BREAK: accept a failed gate result."
+test_file = "test/native-inert-gate.test.ts"
+list_command = ["bun", "scripts/list-bun-tests.mjs", "--cwd", ".", "test/native-inert-gate.test.ts", "-t", "{test}"]
+runner = "command"
+command = ["bun", "test", "--isolate", "test/native-inert-gate.test.ts", "-t", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^native-inert\srecord\swriter\srejects\spass\sfalse$']
+
+[[control]]
 id = "shared-pre-response-no-selection-reset"
 guards = "The absolute pre-response deadline survives endpoint fallback and revisits to an already selected account."
 file = "packages/opencode/src/plugin/shared/request-services.ts"

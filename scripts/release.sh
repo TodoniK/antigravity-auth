@@ -4,14 +4,20 @@ set -euo pipefail
 # release.sh — Tag and push a new CortexKit Antigravity auth monorepo release
 #
 # Usage:
-#   ./scripts/release.sh 1.7.0        # release v1.7.0
+#   ./scripts/release.sh --prepare 1.7.0 # commit version sync, without tagging
+#   ./scripts/release.sh 1.7.0        # verify, tag and push prepared v1.7.0
 #   ./scripts/release.sh 1.7.0 --dry  # preview without committing/pushing
 
+PREPARE=""
+if [[ "${1:-}" == "--prepare" ]]; then
+  PREPARE="yes"
+  shift
+fi
 VERSION="${1:-}"
 DRY="${2:-}"
 
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: ./scripts/release.sh <version> [--dry]"
+  echo "Usage: ./scripts/release.sh [--prepare] <version> [--dry]"
   echo "  e.g. ./scripts/release.sh 1.7.0"
   exit 1
 fi
@@ -53,7 +59,27 @@ if [[ "$DRY" == "--dry" ]]; then
   echo "→ Version sync (dry run):"
   node scripts/version-sync.mjs "$VERSION" --dry-run
   echo ""
-  echo "[DRY RUN] Would commit, tag $TAG, and push to origin."
+  if [[ -n "$PREPARE" ]]; then
+    echo "[DRY RUN] Would commit version sync; no gate, tag or push."
+  else
+    echo "[DRY RUN] Would verify the prepared commit and native-inert gate, tag $TAG, and push to origin."
+  fi
+  exit 0
+fi
+
+if [[ -n "$PREPARE" ]]; then
+  echo "→ Syncing version to $VERSION..."
+  node scripts/version-sync.mjs "$VERSION"
+  bun scripts/sync-release-lock.ts "$VERSION"
+  echo "→ Committing version bump..."
+  git add packages/core/package.json packages/opencode/package.json packages/pi/package.json bun.lock
+  if git diff --cached --quiet; then
+    echo "  (no changes — version already at $VERSION)"
+  else
+    git commit -m "release: $TAG"
+  fi
+  echo "Prepared $TAG. No gate, tag or push was run."
+  echo "Run the MOTOR native-inert gate and record its stdout, then ./scripts/release.sh $VERSION."
   exit 0
 fi
 
@@ -77,17 +103,16 @@ bun run build 2>&1 || { echo "Error: Build failed"; exit 1; }
 echo "  ✓ All checks passed"
 echo ""
 
-echo "→ Syncing version to $VERSION..."
-node scripts/version-sync.mjs "$VERSION"
-echo ""
+echo "→ Verifying the prepared version-sync commit..."
+bun scripts/check-release-version.ts "$VERSION"
 
-echo "→ Committing version bump..."
-git add -A
-if git diff --cached --quiet; then
-  echo "  (no changes — version already at $VERSION)"
-else
-  git commit -m "release: $TAG"
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "Error: pre-release checks changed the working tree — refusing to tag"
+  exit 1
 fi
+
+echo "→ Verifying the native-inert gate on the exact release commit..."
+bun scripts/check-native-inert-release.ts
 
 echo "→ Creating tag $TAG..."
 git tag -a "$TAG" -m "Release $TAG"

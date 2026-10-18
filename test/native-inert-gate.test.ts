@@ -1,0 +1,217 @@
+import { afterEach, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { reconcileMotor } from '../scripts/native-inert-gate.ts'
+
+const sourceRoot = resolve(import.meta.dir, '..')
+const inventoryPath = 'packages/e2e-tests/docker/native-inert-inventory.json'
+const frozen = readFileSync(join(sourceRoot, inventoryPath))
+const roots: string[] = []
+afterEach(() => {
+  for (const root of roots.splice(0))
+    rmSync(root, { recursive: true, force: true })
+})
+
+function git(root: string, ...args: string[]) {
+  const result = Bun.spawnSync(['git', ...args], {
+    cwd: root,
+    env: {
+      ...process.env,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'safe.directory',
+      GIT_CONFIG_VALUE_0: root,
+    },
+  })
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString())
+  return result.stdout.toString().trim()
+}
+
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), 'native-inert-record-'))
+  roots.push(root)
+  mkdirSync(join(root, 'packages/e2e-tests/docker'), { recursive: true })
+  writeFileSync(join(root, inventoryPath), frozen)
+  writeFileSync(join(root, '.gitignore'), '.cortexkit/\n')
+  git(root, 'init', '-b', 'main')
+  git(root, 'config', 'user.name', 'Gate Test')
+  git(root, 'config', 'user.email', 'gate@example.invalid')
+  git(root, 'add', '.')
+  git(root, '-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'fixture')
+  const result = {
+    schemaVersion: 1,
+    commit: git(root, 'rev-parse', 'HEAD'),
+    tree: git(root, 'rev-parse', 'HEAD^{tree}'),
+    pass: true,
+    stages: [
+      'bun-version',
+      'typescript-version',
+      'biome-version',
+      'core-build',
+      'strict-ga',
+      'strict-scripts',
+      'scoped-biome-check',
+      'portable-suite',
+      'motor-suite',
+    ].map((name) => ({ name, exit: 0 })),
+    names: JSON.parse(frozen.toString()) as string[],
+    inventorySha256: createHash('sha256').update(frozen).digest('hex'),
+    motor: { pass: 279, fail: 0, assertions: 2336 },
+    bunVersion: '1.4.2',
+    startedUtc: '2026-10-17T08:00:00.000Z',
+    endedUtc: '2026-10-17T08:01:00.000Z',
+  }
+  return {
+    root,
+    result,
+    record: join(root, '.cortexkit/release-gates/native-inert.json'),
+  }
+}
+
+function run(root: string, script: string, ...args: string[]) {
+  return Bun.spawnSync(
+    [process.execPath, join(sourceRoot, 'scripts', script), ...args],
+    { cwd: root },
+  )
+}
+
+test('native-inert record writer accepts a fully validated result', () => {
+  const { root, result, record } = fixture()
+  const stdout = join(root, '.cortexkit/stdout')
+  mkdirSync(join(root, '.cortexkit'), { recursive: true })
+  const text = `stage output\nNATIVE_INERT_GATE_RESULT=${JSON.stringify(result)}\n`
+  writeFileSync(stdout, text)
+  const written = run(root, 'record-native-inert-gate.ts', stdout)
+  expect(written.exitCode, written.stderr.toString()).toBe(0)
+  expect(JSON.parse(readFileSync(record, 'utf8'))).toEqual({
+    ...result,
+    stdoutSha256: createHash('sha256').update(text).digest('hex'),
+  })
+})
+
+for (const invalid of [
+  'pass false',
+  'missing stage',
+  '40 names',
+  'wrong hash',
+  'two result lines',
+  'unknown commit',
+  'truncated line',
+  'interrupted output',
+  'wrong tree',
+  'failed stage',
+  'zero assertions',
+  'bad schema',
+  'bad times',
+] as const) {
+  test(`native-inert record writer rejects ${invalid}`, () => {
+    const { root, result, record } = fixture()
+    mkdirSync(join(root, '.cortexkit/release-gates'), { recursive: true })
+    writeFileSync(record, JSON.stringify({ ...result, commit: '0'.repeat(40) }))
+    if (invalid === 'pass false') result.pass = false
+    if (invalid === 'missing stage') result.stages.pop()
+    if (invalid === '40 names') result.names.pop()
+    if (invalid === 'wrong hash') result.inventorySha256 = '0'.repeat(64)
+    if (invalid === 'unknown commit') result.commit = 'f'.repeat(40)
+    if (invalid === 'wrong tree') result.tree = '0'.repeat(40)
+    if (invalid === 'failed stage')
+      result.stages[0] = { name: 'bun-version', exit: 1 }
+    if (invalid === 'zero assertions') result.motor.assertions = 0
+    if (invalid === 'bad schema') result.schemaVersion = 2
+    if (invalid === 'bad times') result.endedUtc = 'yesterday'
+    let text = `NATIVE_INERT_GATE_RESULT=${JSON.stringify(result)}\n`
+    if (invalid === 'two result lines') text += text
+    if (invalid === 'truncated line') text = text.slice(0, -5)
+    if (invalid === 'interrupted output')
+      text = 'stage started, job interrupted\n'
+    const stdout = join(root, '.cortexkit/stdout')
+    writeFileSync(stdout, text)
+    const written = run(root, 'record-native-inert-gate.ts', stdout)
+    expect(written.exitCode).not.toBe(0)
+    expect(existsSync(record)).toBe(false)
+  })
+}
+
+for (const state of [
+  'absent',
+  'other commit',
+  'pass false',
+  'exact commit',
+] as const) {
+  test(`native-inert release check handles ${state}`, () => {
+    const { root, result, record } = fixture()
+    if (state === 'other commit') {
+      git(
+        root,
+        '-c',
+        'core.hooksPath=/dev/null',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'identical tree, different commit',
+      )
+      expect(git(root, 'rev-parse', 'HEAD^{tree}')).toBe(result.tree)
+    }
+    if (state === 'pass false') result.pass = false
+    if (state !== 'absent') {
+      mkdirSync(join(root, '.cortexkit/release-gates'), { recursive: true })
+      writeFileSync(
+        record,
+        JSON.stringify({ ...result, stdoutSha256: 'a'.repeat(64) }),
+      )
+    }
+    const checked = run(root, 'check-native-inert-release.ts')
+    expect(checked.exitCode === 0, checked.stderr.toString()).toBe(
+      state === 'exact commit',
+    )
+    if (state !== 'exact commit') {
+      expect(checked.stderr.toString()).toContain('bun run test:native-inert')
+      expect(checked.stderr.toString()).toContain('record-native-inert-gate.ts')
+    }
+  })
+}
+
+test('motor reconciliation requires each frozen registration, entry and framework pass once', () => {
+  const names = JSON.parse(frozen.toString()) as string[]
+  const registration = `MOTOR_INERT_INVENTORY=${JSON.stringify({ revision: 'r6', profile: 'motor-inert', expected: names, registered: names, executedAtInventoryCheck: names, registeredCount: 41, executedCountAtInventoryCheck: 41 })}\n`
+  const entries = names
+    .map((name) => `MOTOR_INERT_EXECUTED=${JSON.stringify(name)}`)
+    .join('\n')
+  const passes = names.map((name) => `(pass) ${name} [1.00ms]`).join('\n')
+  const stdout = `${registration}${entries}\n`
+  const stderr = `${passes}\n 41 pass\n 0 fail\n 100 expect() calls\n`
+  expect(reconcileMotor(stdout, stderr, names)).toEqual({
+    pass: 41,
+    fail: 0,
+    assertions: 100,
+  })
+  expect(() => reconcileMotor(stdout + registration, stderr, names)).toThrow()
+  expect(() =>
+    reconcileMotor(
+      stdout.replace(`MOTOR_INERT_EXECUTED=${JSON.stringify(names[0])}\n`, ''),
+      stderr,
+      names,
+    ),
+  ).toThrow()
+  expect(() =>
+    reconcileMotor(
+      stdout,
+      stderr.replace(`(pass) ${names[0]} [1.00ms]\n`, ''),
+      names,
+    ),
+  ).toThrow()
+  expect(() =>
+    reconcileMotor(stdout, stderr.replace(' 0 fail', ' 1 fail'), names),
+  ).toThrow()
+  expect(() =>
+    reconcileMotor(stdout, `${stderr}(skip) other case\n`, names),
+  ).toThrow()
+})

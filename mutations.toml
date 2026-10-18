@@ -331,6 +331,32 @@ test_count_pattern = "Ran {count} test"
 expect_red = ['^genuine\spublic-store\soffline\smigration\simports\sfull\srows,\scredential\sstamps,\sfield\spresence,\sorder\sand\sindependent\scursors\sthen\sverifies\sactive\sno-op$']
 
 [[control]]
+id = "shared-pointer-journal-save-owner-guard"
+guards = "Pointer publication retains journal and generation-directory barriers unless the still-owning caller explicitly vouches for its completed save."
+file = "packages/core/src/account-migration.ts"
+old = "  if (journalSavedBy !== managementLease) {"
+new = "  if (false) { // NON-VACUITY BREAK: skip without a same-owner save."
+test_file = "test/common-auth-010-store/pointer-durability.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^pointer\spublication\sdurability\skeeps\scaptured-journal\sbarriers\swithout\san\sexplicit\ssame-owner\ssave$']
+
+[[control]]
+id = "shared-pointer-reused-stage-sync"
+guards = "The pointer-only created-file optimization must still sync a validated preexisting pointer stage before linking."
+file = "packages/core/src/account-migration.ts"
+old = "  if (handle === undefined || !pointerStage) await syncFile(path)"
+new = "  if (!pointerStage) await syncFile(path) // NON-VACUITY BREAK: skip the reused stage barrier."
+test_file = "test/common-auth-010-store/pointer-durability.test.ts"
+list_command = ["bash", "-c", "bun scripts/list-bun-tests.mjs --cwd . test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+runner = "command"
+command = ["bash", "-c", "bun run --cwd packages/core build && bun test --isolate test/common-auth-010-store/pointer-durability.test.ts -t \"$1|^pointer publication durability rejects canonical journal content changes after the owned save$\"", "--", "{test}"]
+test_count_pattern = "Ran {count} test"
+expect_red = ['^pointer\spublication\sdurability\ssyncs\sa\svalidated\sreused\spointer\sstage\sbefore\slinking$']
+
+[[control]]
 id = "pi-vault-placeholder-recognition"
 guards = "The exact non-secret Pi custody marker admits vault-only dispatch using the served credential."
 file = "packages/pi/src/stream.ts"

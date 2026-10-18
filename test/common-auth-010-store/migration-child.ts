@@ -1,5 +1,7 @@
+import { spyOn } from 'bun:test'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
+import * as observedFs from 'node:fs/promises'
 import {
   lstat,
   mkdir,
@@ -716,6 +718,39 @@ async function runChild(): Promise<void> {
     )
     lastPhase = 'operation-start'
     let seeded = false
+    const crash = async (point: string) => {
+      await send({
+        kind: 'crash',
+        nonce,
+        pid: process.pid,
+        boundary: point,
+        locks: await lockClaims(root),
+      })
+      // Only the owning parent may clean these leases after observing exit.
+      process.exit(boundary.startsWith('pointer-dedup:') ? 91 : 73)
+    }
+    if (boundary.startsWith('pointer-dedup:')) {
+      const actualOpen = observedFs.open
+      spyOn(observedFs, 'open').mockImplementation(async (...args) => {
+        const pointerStage =
+          String(args[0]).startsWith(
+            `${join(root, 'accounts.json')}.store.pointer.json.`,
+          ) &&
+          String(args[0]).endsWith('.tmp') &&
+          args[1] === 'wx'
+        if (pointerStage && boundary === 'pointer-dedup:before-stage')
+          await crash(boundary)
+        const handle = await actualOpen(...args)
+        if (pointerStage && boundary === 'pointer-dedup:after-stage-sync') {
+          const actualSync = handle.sync.bind(handle)
+          handle.sync = async () => {
+            await actualSync()
+            await crash(boundary)
+          }
+        }
+        return handle
+      })
+    }
     const onBoundary = async (point: string) => {
       lastPhase = point
       if (
@@ -771,18 +806,12 @@ async function runChild(): Promise<void> {
           await store.disable(firstMapping.id, 'synthetic-restart-disable')
         }
       }
-      if (point !== boundary) return
-      await send({
-        kind: 'crash',
-        nonce,
-        pid: process.pid,
-        boundary: point,
-        locks: await lockClaims(root),
-      })
-      // This fixture child exits after reporting its scoped lease references. The
-      // parent signals only that direct child handle, never a guessed PID, group
-      // or another test's process/locks; deletion also requires observed exit.
-      process.exit(73)
+      const pointerCut = {
+        'pointer-dedup:before-resync': 'pointer:before-publication',
+        'pointer-dedup:before-link': 'pointer:before-link',
+        'pointer-dedup:after-link': 'pointer:after-link-before-parent-sync',
+      }[boundary]
+      if (point === boundary || point === pointerCut) await crash(boundary)
     }
     const input = {
       legacyPath: join(root, 'accounts.json'),

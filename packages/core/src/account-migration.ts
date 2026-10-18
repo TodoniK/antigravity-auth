@@ -1356,6 +1356,7 @@ async function exclusiveBytes(
   bytes: Buffer,
   expectedHash: string,
   boundary?: AccountMigrationOptions['onBoundary'],
+  pointerStage = false,
 ): Promise<void> {
   let handle: Awaited<ReturnType<typeof open>> | undefined
   try {
@@ -1376,7 +1377,9 @@ async function exclusiveBytes(
   const reopened = await secureRead(path)
   if (digest(reopened) !== expectedHash || !reopened.equals(bytes))
     throw new AccountMigrationError('exclusive backup or recovery copy differs')
-  await syncFile(path)
+  // A new pointer stage was synced through its write handle. Reused stages and
+  // all backup, bootstrap, retired and export copies retain the reopened barrier.
+  if (handle === undefined || !pointerStage) await syncFile(path)
   await syncDirectory(dirname(path), boundary)
 }
 async function readJournal(
@@ -2653,6 +2656,7 @@ export function createAccountMigrationFactory(
                       physical,
                       journal,
                       parentLease,
+                      lease,
                       prior,
                       options.onBoundary,
                     )
@@ -3403,8 +3407,10 @@ export async function initializeFreshAccountStore(
                     physical,
                     journal,
                     parentLease,
+                    lease,
                     undefined,
                     options.onBoundary,
+                    lease,
                   )
                   await options.onBoundary?.('pointer:after-publication')
                 },
@@ -3568,10 +3574,13 @@ async function publishGenerationPointer(
   paths: AccountStorePaths,
   journal: AccountMigrationJournal,
   parentLease: MigrationLease,
+  managementLease: MigrationLease,
   prior?: AccountStorePointer,
   boundary?: AccountMigrationOptions['onBoundary'],
+  journalSavedBy?: MigrationLease,
 ): Promise<void> {
   await parentLease.assertOwned()
+  await managementLease.assertOwned()
   const currentJournal = await readJournal(paths)
   if (
     !currentJournal ||
@@ -3581,8 +3590,12 @@ async function publishGenerationPointer(
     throw new AccountMigrationError(
       'publication requires its complete synced canonical journal',
     )
-  await syncFile(paths.migrationPath)
-  await syncDirectory(paths.storeDir)
+  // Only the fresh initializer supplies its still-held lease after saveJournal
+  // returns. Other callers retain both barriers rather than infer a prior save.
+  if (journalSavedBy !== managementLease) {
+    await syncFile(paths.migrationPath)
+    await syncDirectory(paths.storeDir)
+  }
   const pointer: AccountStorePointer = {
     schemaVersion: 1,
     id: journal.id,
@@ -3592,8 +3605,9 @@ async function publishGenerationPointer(
   if (prior === undefined) {
     const stage = `${path}.${journal.id}.tmp`
     const bytes = Buffer.from(`${JSON.stringify(pointer, null, 2)}\n`)
-    await exclusiveBytes(stage, bytes, digest(bytes))
+    await exclusiveBytes(stage, bytes, digest(bytes), undefined, true)
     await parentLease.assertOwned()
+    await managementLease.assertOwned()
     await boundary?.('pointer:before-link')
     if (await exists(resolveAccountStorePaths(paths.legacyPath).storeDir))
       throw new AccountMigrationError(
@@ -3636,6 +3650,7 @@ async function publishGenerationPointer(
       stageName: () => stageName,
       beforeRename: async () => {
         await parentLease.assertOwned()
+        await managementLease.assertOwned()
         if (
           !isDeepStrictEqual(await readPointer(paths.legacyPath), prior) ||
           (await readJournal(oldPaths))?.status !== 'inactive'
@@ -3650,6 +3665,7 @@ async function publishGenerationPointer(
     await syncDirectory(dirname(path))
   }
   await parentLease.assertOwned()
+  await managementLease.assertOwned()
 }
 function withParentTopology<T>(
   modules: AccountMigrationModules,

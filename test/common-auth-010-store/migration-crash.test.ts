@@ -39,6 +39,8 @@ import {
   saveAccountStorage,
   saveAccountStorageReplace,
 } from '../../packages/core/src/account-storage.ts'
+import { createDefaultAccountStoreOperations } from '../../packages/opencode/src/cli.ts'
+import { openAccountStore } from '../../packages/opencode/src/plugin/storage.ts'
 import {
   assertDisposableChildRoot,
   type ChildLockClaim,
@@ -351,7 +353,7 @@ async function crashOwnedChild(
     !reaped ||
     !owned ||
     !crashed ||
-    child.exitCode !== 73 ||
+    child.exitCode !== (boundary.startsWith('pointer-dedup:') ? 91 : 73) ||
     timedOut ||
     (!claims.length && !preClaim)
   )
@@ -459,6 +461,81 @@ describe('owned real-process migration crash seams', () => {
       now: Date.now,
     }
   }
+
+  for (const boundary of [
+    'pointer-dedup:before-resync',
+    'pointer-dedup:before-stage',
+    'pointer-dedup:after-stage-sync',
+    'pointer-dedup:before-link',
+    'pointer-dedup:after-link',
+  ])
+    integrationIt(
+      `preserves readers and replay after exit-91 ${boundary}`,
+      async (create, modules, inputs) => {
+        const fixture = await create(MIGRATION_SOURCE)
+        await unlink(fixture.legacyPath)
+        await crashOwnedChild(fixture, boundary, 'initialize', inputs)
+        const linked = boundary === 'pointer-dedup:after-link'
+        const expected = linked ? 'pending' : 'initialization-required'
+        const binding = await readAccountStoreBinding(
+          fixture.legacyPath,
+          modules,
+          Date.now,
+        )
+        const admission = await readAccountStoreAdmission(
+          fixture.legacyPath,
+          modules,
+          Date.now,
+        )
+        expect(binding.status).toBe(expected)
+        expect(admission.status).toBe(expected)
+        if (linked) {
+          expect(binding).toMatchObject({
+            operation: 'migrate',
+            phase: 'capture',
+          })
+          expect(admission).toMatchObject({
+            operation: 'migrate',
+            phase: 'capture',
+          })
+        }
+        expect(
+          (
+            await openAccountStore({
+              legacyPath: fixture.legacyPath,
+              modules,
+              createRepository: () => {
+                throw new Error('crashed generation must not serve')
+              },
+              exchange: async () => {
+                throw new Error('crashed generation must not refresh')
+              },
+            })
+          ).status,
+        ).toBe(linked ? 'refused' : 'initialization-required')
+        expect(
+          (await createDefaultAccountStoreOperations().read(fixture.legacyPath))
+            .kind,
+        ).toBe(linked ? 'unavailable' : 'uninitialized')
+        expect(
+          (
+            await initializeFreshAccountStore(modules, {
+              legacyPath: fixture.legacyPath,
+              now: Date.now,
+            })
+          ).status,
+        ).toBe('completed')
+        expect(
+          (
+            await readAccountStoreAdmission(
+              fixture.legacyPath,
+              modules,
+              Date.now,
+            )
+          ).status,
+        ).toBe('active')
+      },
+    )
 
   for (const boundary of MIGRATION_CASES)
     integrationIt(

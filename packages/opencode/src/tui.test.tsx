@@ -2452,6 +2452,7 @@ describe('TUI module graph', () => {
         join(SRC, 'tui', 'command-dialogs.tsx'),
         join(SRC, 'tui', 'host-api.ts'),
         join(SRC, 'tui', 'quota-layout.tsx'),
+        join(SRC, 'tui', 'route-layout.ts'),
       ].sort(),
     )
   })

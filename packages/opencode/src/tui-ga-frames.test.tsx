@@ -18,8 +18,10 @@
 
 import { describe, expect, it } from 'bun:test'
 import { testRender } from '@opentui/solid'
+
 import { setupGaTui } from './ga/tui/host-ga'
 import { DEFAULT_QUOTA_APPEARANCE } from './tui/quota-layout'
+import { fitRouteParts, routeLineFits } from './tui/route-layout'
 import { DEFAULT_PREFS } from './tui-preferences'
 
 const MINUTE = 60_000
@@ -388,8 +390,15 @@ describe('OpenCode 2 sidebar quota layout', () => {
       show('session with route', width, frame)
       expectPlainGroupNames(frame)
       expect(lineWith(frame, /^7d .*\b48% left\s+6d$/)).toBeDefined()
-      expect(contentLines(frame).join(' ')).toContain(
-        'Route Account 1 · claude · antigravity',
+      const routeLine = lineWith(frame, /^Route /)
+      expect(routeLine).toBeDefined()
+      expect(routeLine?.length).toBeLessThanOrEqual(width)
+      expect(routeLine).toBe(
+        width < 26
+          ? 'Route Account 1'
+          : width < 38
+            ? 'Route Account 1 · claude'
+            : 'Route Account 1 · claude · antigravity',
       )
     })
 
@@ -405,4 +414,14 @@ describe('OpenCode 2 sidebar quota layout', () => {
       expect(frame).not.toContain('Route')
     })
   }
+
+  it('shortens long account labels at whole-word boundaries', () => {
+    const value = fitRouteParts(
+      'Route',
+      ['Account team one', 'claude', 'antigravity'],
+      20,
+    )
+    expect(value).toBe('Account team…')
+    expect(routeLineFits('Route', value, 20)).toBe(true)
+  })
 })

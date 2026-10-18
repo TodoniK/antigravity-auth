@@ -71,6 +71,7 @@ import {
   QuotaAccountBlock,
   type QuotaPalette,
 } from '../../tui/quota-layout'
+import { fitRouteParts } from '../../tui/route-layout'
 
 export const GA_TUI_ID = 'cortexkit.antigravity-auth' as const
 export const GA_RPC_ID = 'antigravity-auth' as const
@@ -1500,6 +1501,11 @@ function GaSidebar(props: {
       ? view.projected.route
       : null
   }
+  const routeLine = () => {
+    const value = route()
+    if (value === null) return null
+    return `Route ${fitRouteParts('Route', value.split(' · '), contentWidth())}`
+  }
   // The quota rows are sized to the sidebar's width so none of them wraps.
   // Layout reports the width during a render pass, so the signal is updated
   // afterwards rather than rebuilding rows mid-pass.
@@ -1549,8 +1555,8 @@ function GaSidebar(props: {
                 </Show>
               )}
             </For>
-            <Show when={route()}>
-              {(line) => <text>{`Route ${line()}`}</text>}
+            <Show when={routeLine()}>
+              {(line) => <text wrapMode='none'>{line()}</text>}
             </Show>
             <For each={view().projected.notices}>
               {(notice) => <text>{notice}</text>}

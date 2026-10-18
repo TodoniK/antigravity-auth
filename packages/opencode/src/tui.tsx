@@ -75,6 +75,7 @@ import {
   RESET_SINCE_READING,
   showsFigure,
 } from './tui/quota-layout'
+import { routeLineFits } from './tui/route-layout'
 import {
   type AntigravityAuthTuiPrefs,
   type AppearancePrefs,
@@ -844,10 +845,11 @@ export function SidebarPanel(props: SidebarPanelProps): JSX.Element {
             >
               {(route) => (
                 <Show
-                  when={
-                    'Route'.length + 1 + routeValue(route()).length <=
-                    contentWidth()
-                  }
+                  when={routeLineFits(
+                    'Route',
+                    routeValue(route()),
+                    contentWidth(),
+                  )}
                   fallback={
                     <For each={routeLines(route())}>
                       {(line) => (

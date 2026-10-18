@@ -28,6 +28,7 @@ import {
   loadCommonAuthCommands,
   type loadManagedProject,
   type OpencodeModelDefinition,
+  redactProjectIdText,
   type refreshAntigravityToken,
 } from '@cortexkit/antigravity-auth-core'
 import type { Model, Plugin } from '@opencode/plugin'
@@ -40,6 +41,7 @@ import type {
   SessionRequestKind,
   SessionRetry,
 } from '@opencode/plugin/promise/session'
+
 import { placeholderSecret } from '../../common-auth-embedded/opencode2/index.js'
 import { createGaLocationServices } from '../../plugin/ga-location-services.ts'
 import { isCanonicalGoogleOrigin } from '../../plugin/google-origin.ts'
@@ -411,10 +413,11 @@ export interface GaLoopbackBridgeOptions {
 
 /** The HTTP 502 answer for a terminal failure before upstream headers. */
 export function gaPreHeaderFailureResponse(error: unknown): Response {
-  const message =
+  const rawMessage =
     error instanceof Error && error.message
       ? error.message
       : 'Antigravity request failed before a response arrived'
+  const message = redactProjectIdText(rawMessage)
   return new Response(
     JSON.stringify({ error: { code: 502, message, status: 'UNAVAILABLE' } }),
     { status: 502, headers: { 'content-type': 'application/json' } },

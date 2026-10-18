@@ -13,6 +13,7 @@ import {
   orderAgyRequestPayloadInPlace,
   type PreResponseClock,
   PreResponseDeadline,
+  parseRefreshParts,
   RETIRED_AGY_MODEL_MESSAGE,
   redactCredentialError,
   redactCredentialText,
@@ -465,6 +466,7 @@ async function sendAntigravityRequest(options: {
   sessionKey: string
   signal?: AbortSignal
   assertAdmission?: () => Promise<void>
+  selectedProjectIds: Set<string>
   deadline: PreResponseDeadline
 }): Promise<Response> {
   if (isRetiredAgyModel(options.model.id)) {
@@ -474,6 +476,13 @@ async function sendAntigravityRequest(options: {
   // `refreshToken|projectId|managedProjectId` saved at getApiKey supplies
   // the managed project without a loadCodeAssist call per turn.
   const packedRefresh = getPackedRefresh(options.accessToken) ?? ''
+  const packedProject = parseRefreshParts(packedRefresh)
+  for (const projectId of [
+    packedProject.projectId,
+    packedProject.managedProjectId,
+  ]) {
+    if (projectId) options.selectedProjectIds.add(projectId)
+  }
   const projectContext = await options.deadline.wait(() =>
     ensureProjectContext({
       type: 'oauth',
@@ -483,6 +492,8 @@ async function sendAntigravityRequest(options: {
     }),
   )
 
+  if (projectContext.effectiveProjectId)
+    options.selectedProjectIds.add(projectContext.effectiveProjectId)
   const prepared = prepareAntigravityRequest(options)
   await options.deadline.wait(() => options.assertAdmission?.())
   return dispatchAntigravityRequest(
@@ -513,6 +524,7 @@ type OpenAntigravityResponse = (
   sessionKey: string,
   signal: AbortSignal,
   selectedCredentials: Set<string>,
+  selectedProjectIds: Set<string>,
   deadline: PreResponseDeadline,
 ) => Promise<Response>
 
@@ -527,7 +539,13 @@ export function streamCortexKitAntigravity(
     model,
     context,
     options,
-    async (sessionKey, signal, _selectedCredentials, deadline) => {
+    async (
+      sessionKey,
+      signal,
+      _selectedCredentials,
+      selectedProjectIds,
+      deadline,
+    ) => {
       await deadline.wait(() => assertAdmission?.())
       const accessToken = options?.apiKey ?? ''
       if (!accessToken)
@@ -540,6 +558,7 @@ export function streamCortexKitAntigravity(
         sessionKey,
         signal,
         assertAdmission,
+        selectedProjectIds,
         deadline,
       })
     },
@@ -567,7 +586,13 @@ export function createCortexKitAntigravityVaultStream(
       model,
       context,
       options,
-      (sessionKey, signal, selectedCredentials, deadline) => {
+      (
+        sessionKey,
+        signal,
+        selectedCredentials,
+        selectedProjectIds,
+        deadline,
+      ) => {
         if (options?.apiKey !== placeholderKey)
           throw new Error(
             'The native Google credential slot is not synchronized for vault mode. No request was sent.',
@@ -581,13 +606,18 @@ export function createCortexKitAntigravityVaultStream(
         return deadline.open(() =>
           send(async (credential, sendSignal) => {
             selectedCredentials.add(credential.accessToken)
+            selectedProjectIds.add(credential.projectId)
             try {
               deadline.follow(sendSignal)
               return await deadline.open(() =>
                 dispatchAntigravityRequest(prepared, credential, signal),
               )
             } catch (error) {
-              throw redactCredentialError(error, [...selectedCredentials])
+              throw redactCredentialError(
+                error,
+                [...selectedCredentials],
+                [...selectedProjectIds],
+              )
             }
           }, signal),
         )
@@ -611,6 +641,7 @@ function runAntigravityStream(
     const selectedCredentials = new Set<string>(
       options?.apiKey ? [options.apiKey] : [],
     )
+    const selectedProjectIds = new Set<string>()
     stream.push({ type: 'start', partial: output })
     let response: Response | undefined
     let requestAbort: AbortController | undefined
@@ -623,7 +654,13 @@ function runAntigravityStream(
       requestAbort = openingAbort
       detachCaller = forwardAbort(deadline.signal, openingAbort)
       response = await deadline.open(() =>
-        open(sessionKey, openingAbort.signal, selectedCredentials, deadline),
+        open(
+          sessionKey,
+          openingAbort.signal,
+          selectedCredentials,
+          selectedProjectIds,
+          deadline,
+        ),
       )
       if (response.ok) deadline.acceptHeaders()
 
@@ -851,6 +888,7 @@ function runAntigravityStream(
       output.errorMessage = redactCredentialText(
         error instanceof Error ? error.message : String(error),
         [...selectedCredentials],
+        [...selectedProjectIds],
       )
       stream.push({ type: 'error', reason: output.stopReason, error: output })
       stream.end()

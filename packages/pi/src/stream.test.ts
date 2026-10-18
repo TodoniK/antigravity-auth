@@ -25,6 +25,7 @@ import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent'
 import opusLow from '../../../test-fixtures/agy-cli-1.3.3/native-opus-low.json'
 import sonnetLow from '../../../test-fixtures/agy-cli-1.3.3/native-sonnet-low.json'
 import schemaDerived from '../../../test-fixtures/agy-cli-1.3.3/schema-derived-thinking.json'
+import { rememberPackedRefresh } from './credential-cache.ts'
 
 const ensureProjectContextMock = mock(async () => ({
   auth: {
@@ -352,10 +353,29 @@ describe('selected credential boundary', () => {
     }
   })
 
+  it('redacts a project ID echoed by project resolution errors', async () => {
+    const projectId = 'my-real-project-123456'
+    rememberPackedRefresh('project-resolution-token', `refresh|${projectId}|`)
+    ensureProjectContextMock.mockImplementationOnce(async () => {
+      throw new Error(`project lookup echo ${projectId}`)
+    })
+
+    const { result } = await collectStream(
+      streamCortexKitAntigravity(fakeModel(), userContext(), {
+        apiKey: 'project-resolution-token',
+      }),
+    )
+
+    expect(result.stopReason).toBe('error')
+    expect(result.errorMessage).not.toContain(projectId)
+    expect(result.errorMessage).toContain('my-r****3456')
+    expect(fetchWithAgyCliTransportMock).not.toHaveBeenCalled()
+  })
+
   for (const source of ['transport', 'http', 'sse'] as const) {
     it(`redacts selected credential in Pi ${source} errors`, async () => {
       const detail =
-        'echo test-token Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
+        'echo test-token test-project Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
       fetchWithAgyCliTransportMock.mockImplementationOnce(async () => {
         if (source === 'transport') throw new Error(detail)
         if (source === 'http') return new Response(detail, { status: 403 })
@@ -370,6 +390,8 @@ describe('selected credential boundary', () => {
       )
       expect(result.stopReason).toBe('error')
       expect(result.errorMessage).not.toContain('test-token')
+      expect(result.errorMessage).not.toContain('test-project')
+      expect(result.errorMessage).toContain('test****ject')
       expect(result.errorMessage).not.toContain('another-token')
       expect(result.errorMessage).not.toContain('eyJ')
       expect(result.errorMessage).toContain('[credential]')

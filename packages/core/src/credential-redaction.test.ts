@@ -6,6 +6,7 @@ import {
   redactCredentialFrame,
   redactCredentialResponse,
   redactCredentialText,
+  redactProjectIdText,
 } from './credential-redaction.ts'
 
 const selected = 'opaque-selected-token'
@@ -13,6 +14,28 @@ const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
 const detail = `${selected} Bearer other-token ${jwt}`
 
 describe('credential redaction', () => {
+  it('masks project identifiers with the shared debug-log shape', () => {
+    const projectId = 'my-real-project-123456'
+    const masked = 'my-r****3456'
+
+    expect(redactProjectIdText(`echo ${projectId}`, [projectId])).toBe(
+      `echo ${masked}`,
+    )
+    expect(redactProjectIdText(`Project: ${projectId}`)).toBe(
+      `Project: ${masked}`,
+    )
+    expect(redactProjectIdText('Project: Unknown')).toBe('Project: Unknown')
+    expect(
+      redactProjectIdText('IDs project-0 and proj', ['project-0', 'proj']),
+    ).toBe('IDs proj****ct-0 and ****')
+
+    const error = Object.assign(new Error(`echo ${projectId}`), { projectId })
+    expect(redactCredentialError(error, undefined, [projectId])).toMatchObject({
+      message: `echo ${masked}`,
+      projectId: masked,
+    })
+  })
+
   it('imports the same-job built core root through native Node ESM without a resolution shim', () => {
     const result = spawnSync(
       'node',

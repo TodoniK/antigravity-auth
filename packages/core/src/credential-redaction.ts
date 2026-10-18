@@ -1,11 +1,50 @@
 const MARKER = '[credential]'
 type Credentials = string | readonly string[] | undefined
+type ProjectIds = readonly string[] | undefined
+
+/** Use the same visible identifier shape as debug logs and request dumps. */
+export function maskSensitiveIdentifier(
+  value: string | undefined | null,
+): string {
+  if (typeof value !== 'string' || value.length === 0) return ''
+  if (value.length <= 8) return '****'
+  return `${value.slice(0, 4)}****${value.slice(-4)}`
+}
+
+export function redactProjectIdText(
+  text: string,
+  projectIds?: ProjectIds,
+): string {
+  const identifiers = [...new Set(projectIds ?? [])]
+    .filter((projectId) => projectId.length > 0)
+    .sort((left, right) => right.length - left.length)
+  if (identifiers.length > 0) {
+    const expression = new RegExp(
+      identifiers
+        .map((projectId) => projectId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|'),
+      'g',
+    )
+    text = text.replace(expression, (projectId) =>
+      maskSensitiveIdentifier(projectId),
+    )
+  }
+  return text.replace(
+    /(\bproject(?:[\s_-]*id)?\s*[:=]\s*)([a-z0-9_*][a-z0-9_*-]*)/gi,
+    (match, label: string, value: string) =>
+      /^(?:unknown|n\/?a)$/i.test(value) || value.includes('****')
+        ? match
+        : `${label}${maskSensitiveIdentifier(value)}`,
+  )
+}
 
 /** Selected bearers can be opaque; scrub their exact values as well as recognizable token shapes. */
 export function redactCredentialText(
   text: string,
   credentials?: Credentials,
+  projectIds?: ProjectIds,
 ): string {
+  text = redactProjectIdText(text, projectIds)
   for (const credential of typeof credentials === 'string'
     ? [credentials]
     : (credentials ?? [])) {
@@ -19,11 +58,13 @@ export function redactCredentialText(
 function scrub(
   value: unknown,
   credentials: Credentials,
+  projectIds: ProjectIds,
   seen = new WeakSet<object>(),
 ): unknown {
-  if (typeof value === 'string') return redactCredentialText(value, credentials)
+  if (typeof value === 'string')
+    return redactCredentialText(value, credentials, projectIds)
   if (!value || typeof value !== 'object') return value
-  if (!containsCredential(value, credentials)) return value
+  if (!containsCredential(value, credentials, projectIds)) return value
   if (seen.has(value)) return '[Circular]'
   seen.add(value)
   const safe = Array.isArray(value)
@@ -34,14 +75,17 @@ function scrub(
     if (
       key === 'cause' &&
       (!('value' in descriptor) ||
-        containsCredential(descriptor.value, credentials))
+        containsCredential(descriptor.value, credentials, projectIds))
     )
       continue
     Object.defineProperty(
       safe,
       key,
       'value' in descriptor
-        ? { ...descriptor, value: scrub(descriptor.value, credentials, seen) }
+        ? {
+            ...descriptor,
+            value: scrub(descriptor.value, credentials, projectIds, seen),
+          }
         : descriptor,
     )
   }
@@ -51,17 +95,18 @@ function scrub(
 function containsCredential(
   value: unknown,
   credentials: Credentials,
+  projectIds: ProjectIds,
   seen = new WeakSet<object>(),
 ): boolean {
   if (typeof value === 'string')
-    return redactCredentialText(value, credentials) !== value
+    return redactCredentialText(value, credentials, projectIds) !== value
   if (!value || typeof value !== 'object' || seen.has(value)) return false
   seen.add(value)
   return Reflect.ownKeys(value).some((key) => {
     const descriptor = Object.getOwnPropertyDescriptor(value, key)!
     return (
       'value' in descriptor &&
-      containsCredential(descriptor.value, credentials, seen)
+      containsCredential(descriptor.value, credentials, projectIds, seen)
     )
   })
 }
@@ -70,12 +115,14 @@ function containsCredential(
 export function redactCredentialError(
   error: unknown,
   credentials?: Credentials,
+  projectIds?: ProjectIds,
 ): Error {
   const source =
     error instanceof Error || error instanceof DOMException ? error : undefined
   const message = redactCredentialText(
     source?.message ?? String(error),
     credentials,
+    projectIds,
   )
   const fields = source
     ? Reflect.ownKeys(source).map((key) => ({
@@ -86,7 +133,8 @@ export function redactCredentialError(
   const cause = fields.find(({ key }) => key === 'cause')?.descriptor
   const secretCause =
     cause &&
-    (!('value' in cause) || containsCredential(cause.value, credentials))
+    (!('value' in cause) ||
+      containsCredential(cause.value, credentials, projectIds))
   try {
     if (source) {
       if (message !== source.message)
@@ -98,7 +146,7 @@ export function redactCredentialError(
       for (const { key, descriptor } of fields) {
         if (key === 'message' || key === 'cause' || !('value' in descriptor))
           continue
-        const value = scrub(descriptor.value, credentials)
+        const value = scrub(descriptor.value, credentials, projectIds)
         if (value !== descriptor.value)
           Object.defineProperty(source, key, { ...descriptor, value })
       }
@@ -109,7 +157,11 @@ export function redactCredentialError(
     // Frozen diagnostics cannot keep unsafe text, but their classification still matters.
   }
   const safe = new Error(message)
-  safe.name = redactCredentialText(source?.name ?? 'Error', credentials)
+  safe.name = redactCredentialText(
+    source?.name ?? 'Error',
+    credentials,
+    projectIds,
+  )
   for (const { key, descriptor } of fields) {
     if (key === 'message' || key === 'cause' || !('value' in descriptor))
       continue
@@ -117,7 +169,7 @@ export function redactCredentialError(
       ...descriptor,
       configurable: true,
       writable: true,
-      value: scrub(descriptor.value, credentials),
+      value: scrub(descriptor.value, credentials, projectIds),
     })
   }
   if (cause && !secretCause && 'value' in cause) safe.cause = cause.value
@@ -127,14 +179,15 @@ export function redactCredentialError(
 function redactDiagnosticText(
   text: string,
   credentials?: Credentials,
+  projectIds?: ProjectIds,
   parsed?: unknown,
 ): string {
-  const direct = redactCredentialText(text, credentials)
+  const direct = redactCredentialText(text, credentials, projectIds)
   if (direct !== text || !text.includes('\\u')) return direct
   try {
     // JSON escapes can hide a credential even after the diagnostic is recognized.
     const canonical = JSON.stringify(parsed ?? JSON.parse(text))
-    const safe = redactCredentialText(canonical, credentials)
+    const safe = redactCredentialText(canonical, credentials, projectIds)
     return safe === canonical ? text : safe
   } catch {
     return text
@@ -145,12 +198,13 @@ function redactDiagnosticText(
 export function redactCredentialFrame(
   frame: string,
   credentials?: Credentials,
+  projectIds?: ProjectIds,
 ): string {
   if (!frame.includes('"error"') && !frame.includes('\\u')) return frame
   try {
     const value = JSON.parse(frame)
     if (value?.type === 'error' || value?.error || value?.response?.error) {
-      return redactDiagnosticText(frame, credentials, value)
+      return redactDiagnosticText(frame, credentials, projectIds, value)
     }
   } catch {
     // Non-JSON data is not an error envelope.
@@ -177,6 +231,7 @@ export async function redactCredentialResponse(
   response: Response,
   credentials?: Credentials,
   bufferedBody?: string,
+  projectIds?: ProjectIds,
 ): Promise<Response> {
   const init = {
     status: response.status,
@@ -184,10 +239,14 @@ export async function redactCredentialResponse(
     headers: new Headers(response.headers),
   }
   if (!response.ok) {
-    init.statusText = redactCredentialText(init.statusText, credentials)
+    init.statusText = redactCredentialText(
+      init.statusText,
+      credentials,
+      projectIds,
+    )
     let metadataChanged = init.statusText !== response.statusText
     for (const [key, value] of init.headers) {
-      const safe = redactCredentialText(value, credentials)
+      const safe = redactCredentialText(value, credentials, projectIds)
       if (safe !== value) {
         init.headers.set(key, safe)
         metadataChanged = true
@@ -197,11 +256,11 @@ export async function redactCredentialResponse(
       bufferedBody ??
       (response.body
         ? await response.text().catch((error: unknown) => {
-            throw redactCredentialError(error, credentials)
+            throw redactCredentialError(error, credentials, projectIds)
           })
         : null)
     const redacted =
-      text === null ? null : redactDiagnosticText(text, credentials)
+      text === null ? null : redactDiagnosticText(text, credentials, projectIds)
     if (
       (bufferedBody !== undefined || !response.body) &&
       redacted === text &&
@@ -226,7 +285,7 @@ export async function redactCredentialResponse(
       /^data: ?([^\r\n]*)/gm,
       (line, data: string) =>
         line.slice(0, line.length - data.length) +
-        redactCredentialFrame(data, credentials),
+        redactCredentialFrame(data, credentials, projectIds),
     )
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
@@ -253,14 +312,14 @@ export async function redactCredentialResponse(
         }
       } catch (error) {
         reader.releaseLock()
-        controller.error(redactCredentialError(error, credentials))
+        controller.error(redactCredentialError(error, credentials, projectIds))
       }
     },
     async cancel(reason) {
       try {
         await reader.cancel(reason)
       } catch (error) {
-        throw redactCredentialError(error, credentials)
+        throw redactCredentialError(error, credentials, projectIds)
       } finally {
         reader.releaseLock()
       }

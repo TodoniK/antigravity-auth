@@ -1895,11 +1895,15 @@ describe('createRequestExecutor retry contract', () => {
     }
   })
 
-  it('redacts the actual local project-lookup bearer before cancellation returns its terminal failure', async () => {
+  it('redacts the actual local project-lookup bearer and project ID before cancellation returns its terminal failure', async () => {
     const opaque = 'opaque_project_lookup_748a'
-    const failure = Object.assign(new Error(`project lookup echo ${opaque}`), {
-      code: 'PROJECT_LOOKUP_FAILED',
-    })
+    const projectId = 'project-0'
+    const failure = Object.assign(
+      new Error(`project lookup echo ${opaque} ${projectId}`),
+      {
+        code: 'PROJECT_LOOKUP_FAILED',
+      },
+    )
     const caller = new AbortController()
     const used: string[] = []
     const h = harness({
@@ -1933,7 +1937,9 @@ describe('createRequestExecutor retry contract', () => {
       expect(h.calls).toHaveLength(0)
       expect(error).toBe(failure)
       expect(failure.code).toBe('PROJECT_LOOKUP_FAILED')
-      expect(failure.message).toBe('project lookup echo [credential]')
+      expect(failure.message).toBe(
+        'project lookup echo [credential] proj****ct-0',
+      )
     } finally {
       await executor.dispose()
     }
@@ -2006,7 +2012,7 @@ describe('createRequestExecutor retry contract', () => {
   for (const source of ['transport', 'http', 'sse'] as const) {
     it(`redacts selected credential in composed OpenCode ${source} errors`, async () => {
       const detail =
-        'echo access-fresh Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
+        'echo access-fresh project-0 Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
       const failure = Object.assign(new Error(detail), {
         code: 'ECONNRESET',
         detail,
@@ -2050,6 +2056,8 @@ describe('createRequestExecutor retry contract', () => {
             failure.detail,
           ]) {
             expect(text).not.toContain('access-fresh')
+            expect(text).not.toContain('project-0')
+            expect(text).toContain('proj****ct-0')
             expect(text).not.toContain('another-token')
             expect(text).not.toContain('eyJ')
           }
@@ -2061,6 +2069,8 @@ describe('createRequestExecutor retry contract', () => {
           expect(response.status).toBe(source === 'http' ? 400 : 200)
           const text = await response.text()
           expect(text).not.toContain('access-fresh')
+          expect(text).not.toContain('project-0')
+          expect(text).toContain('proj****ct-0')
           expect(text).not.toContain('another-token')
           expect(text).not.toContain('eyJ')
           expect(text).toContain('[credential]')
@@ -2177,7 +2187,7 @@ describe('createRequestExecutor retry contract', () => {
   for (const source of ['transport', 'http', 'sse'] as const) {
     it(`redacts selected credential through GA host bridge ${source}`, async () => {
       const detail =
-        'echo access-fresh Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
+        'echo access-fresh project-0 Bearer another-token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
       const h = harness({
         respond: async () => {
           if (source === 'transport') throw new Error(detail)

@@ -27,11 +27,13 @@ export * from './auth-types.ts'
 export * from './common-auth-runtime.ts'
 export * from './constants.ts'
 export {
+  maskSensitiveIdentifier,
   preserveResponseMetadata,
   redactCredentialError,
   redactCredentialFrame,
   redactCredentialResponse,
   redactCredentialText,
+  redactProjectIdText,
 } from './credential-redaction.ts'
 export * from './fetch-timeout.ts'
 export * from './file-lock.ts'

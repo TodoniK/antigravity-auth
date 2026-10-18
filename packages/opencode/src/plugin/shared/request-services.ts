@@ -34,6 +34,7 @@ import {
   type OAuthAuthDetails,
   type ProjectContextResult,
   parseRateLimitReason,
+  parseRefreshParts,
   preserveResponseMetadata,
   type QuotaGroup,
   type QuotaGroupSummary,
@@ -46,6 +47,7 @@ import {
   type TokenBucketTracker,
   VAULT_ACCOUNT_REMEDY,
 } from '@cortexkit/antigravity-auth-core'
+
 import { ANTIGRAVITY_ENDPOINT_FALLBACKS } from '../../constants'
 import type { AntigravityConfig } from '../config'
 import type { LocationDebug } from '../debug'
@@ -824,6 +826,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     init?: RequestInit,
     options: RequestExecuteOptions = {},
     selectedCredentials: Set<string> = new Set(),
+    selectedProjectIds: Set<string> = new Set(),
   ): Promise<Response> {
     const assertAdmission = async (): Promise<void> => {
       init?.signal?.throwIfAborted()
@@ -955,7 +958,13 @@ export function createRequestExecutor<A extends RequestAccountRow>(
     const debugLines: string[] = []
     const pushDebug = (line: string) => {
       if (!debug.isDebugEnabled()) return
-      debugLines.push(redactCredentialText(line, [...selectedCredentials]))
+      debugLines.push(
+        redactCredentialText(
+          line,
+          [...selectedCredentials],
+          [...selectedProjectIds],
+        ),
+      )
     }
     pushDebug(`request=${urlString}`)
     if (requestSessionIdentity.sessionId) {
@@ -1333,11 +1342,24 @@ export function createRequestExecutor<A extends RequestAccountRow>(
         await assertAdmission()
         // Project resolution can use this bearer before the main model send.
         if (auth.access) selectedCredentials.add(auth.access)
+        const packedProject = parseRefreshParts(auth.refresh)
+        for (const projectId of [
+          packedProject.projectId,
+          packedProject.managedProjectId,
+        ]) {
+          if (projectId) selectedProjectIds.add(projectId)
+        }
         const context = await credentials
           .ensureProject(auth)
           .catch((error: unknown) => {
-            throw redactCredentialError(error, [...selectedCredentials])
+            throw redactCredentialError(
+              error,
+              [...selectedCredentials],
+              [...selectedProjectIds],
+            )
           })
+        if (context.effectiveProjectId)
+          selectedProjectIds.add(context.effectiveProjectId)
         await assertAdmission()
         // A project cache may carry an older bearer. Only the token fixed
         // before this await belongs to the newly prepared request.
@@ -1754,6 +1776,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                 'Local credentials were not resolved for the selected account',
               )
             }
+            if (sendProjectId) selectedProjectIds.add(sendProjectId)
             selectedCredentials.add(sendAccessToken)
             const prepared = prepareAgyWireRequest(wire, {
               input,
@@ -2695,11 +2718,13 @@ export function createRequestExecutor<A extends RequestAccountRow>(
           : [shutdown.signal],
       )
       const selectedCredentials = new Set<string>()
+      const selectedProjectIds = new Set<string>()
       const pending = execute(
         input,
         { ...init, signal: cancellation.signal },
         requestOptions,
         selectedCredentials,
+        selectedProjectIds,
       )
         .then(
           async (response) => {
@@ -2711,6 +2736,7 @@ export function createRequestExecutor<A extends RequestAccountRow>(
                 response,
                 [...selectedCredentials],
                 bufferedOverflow.get(response),
+                [...selectedProjectIds],
               )
             }
             const retained = await retainResponseLifetime(
@@ -2722,16 +2748,26 @@ export function createRequestExecutor<A extends RequestAccountRow>(
             return redactCredentialResponse(
               preserveResponseMetadata(retained.response, response),
               [...selectedCredentials],
+              undefined,
+              [...selectedProjectIds],
             )
           },
           (error: unknown) => {
             cancellation.release()
-            throw redactCredentialError(error, [...selectedCredentials])
+            throw redactCredentialError(
+              error,
+              [...selectedCredentials],
+              [...selectedProjectIds],
+            )
           },
         )
         .catch((error: unknown) => {
           cancellation.release()
-          throw redactCredentialError(error, [...selectedCredentials])
+          throw redactCredentialError(
+            error,
+            [...selectedCredentials],
+            [...selectedProjectIds],
+          )
         })
       inFlight.add(pending)
       void pending.then(

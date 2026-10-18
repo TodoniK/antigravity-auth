@@ -11,6 +11,7 @@ import {
   isGeminiArgonModel,
   isRetiredAgyModel,
   orderAgyRequestPayloadInPlace,
+  parseRefreshParts,
   RETIRED_AGY_MODEL_MESSAGE,
   redactCredentialError,
   redactCredentialText,
@@ -463,6 +464,7 @@ async function sendAntigravityRequest(options: {
   sessionKey: string
   signal?: AbortSignal
   assertAdmission?: () => Promise<void>
+  selectedProjectIds: Set<string>
 }): Promise<Response> {
   if (isRetiredAgyModel(options.model.id)) {
     throw new Error(RETIRED_AGY_MODEL_MESSAGE)
@@ -471,6 +473,13 @@ async function sendAntigravityRequest(options: {
   // `refreshToken|projectId|managedProjectId` saved at getApiKey supplies
   // the managed project without a loadCodeAssist call per turn.
   const packedRefresh = getPackedRefresh(options.accessToken) ?? ''
+  const packedProject = parseRefreshParts(packedRefresh)
+  for (const projectId of [
+    packedProject.projectId,
+    packedProject.managedProjectId,
+  ]) {
+    if (projectId) options.selectedProjectIds.add(projectId)
+  }
   const projectContext = await ensureProjectContext({
     type: 'oauth',
     refresh: packedRefresh,
@@ -478,6 +487,8 @@ async function sendAntigravityRequest(options: {
     expires: Date.now() + 60_000,
   })
 
+  if (projectContext.effectiveProjectId)
+    options.selectedProjectIds.add(projectContext.effectiveProjectId)
   const prepared = prepareAntigravityRequest(options)
   await options.assertAdmission?.()
   return dispatchAntigravityRequest(
@@ -508,6 +519,7 @@ type OpenAntigravityResponse = (
   sessionKey: string,
   signal: AbortSignal,
   selectedCredentials: Set<string>,
+  selectedProjectIds: Set<string>,
 ) => Promise<Response>
 
 export function streamCortexKitAntigravity(
@@ -520,7 +532,7 @@ export function streamCortexKitAntigravity(
     model,
     context,
     options,
-    async (sessionKey, signal) => {
+    async (sessionKey, signal, _selectedCredentials, selectedProjectIds) => {
       await assertAdmission?.()
       const accessToken = options?.apiKey ?? ''
       if (!accessToken)
@@ -533,6 +545,7 @@ export function streamCortexKitAntigravity(
         sessionKey,
         signal,
         assertAdmission,
+        selectedProjectIds,
       })
     },
   )
@@ -557,7 +570,7 @@ export function createCortexKitAntigravityVaultStream(
       model,
       context,
       options,
-      (sessionKey, signal, selectedCredentials) => {
+      (sessionKey, signal, selectedCredentials, selectedProjectIds) => {
         if (options?.apiKey !== placeholderKey)
           throw new Error(
             'The native Google credential slot is not synchronized for vault mode. No request was sent.',
@@ -570,6 +583,7 @@ export function createCortexKitAntigravityVaultStream(
         })
         return send(async (credential, sendSignal) => {
           selectedCredentials.add(credential.accessToken)
+          selectedProjectIds.add(credential.projectId)
           try {
             return await dispatchAntigravityRequest(
               prepared,
@@ -577,7 +591,11 @@ export function createCortexKitAntigravityVaultStream(
               sendSignal ?? signal,
             )
           } catch (error) {
-            throw redactCredentialError(error, [...selectedCredentials])
+            throw redactCredentialError(
+              error,
+              [...selectedCredentials],
+              [...selectedProjectIds],
+            )
           }
         }, signal)
       },
@@ -597,6 +615,7 @@ function runAntigravityStream(
     const selectedCredentials = new Set<string>(
       options?.apiKey ? [options.apiKey] : [],
     )
+    const selectedProjectIds = new Set<string>()
     stream.push({ type: 'start', partial: output })
     let response: Response | undefined
     let requestAbort: AbortController | undefined
@@ -611,6 +630,7 @@ function runAntigravityStream(
         sessionKey,
         requestAbort.signal,
         selectedCredentials,
+        selectedProjectIds,
       )
 
       if (!response.ok) {
@@ -837,6 +857,7 @@ function runAntigravityStream(
       output.errorMessage = redactCredentialText(
         error instanceof Error ? error.message : String(error),
         [...selectedCredentials],
+        [...selectedProjectIds],
       )
       stream.push({ type: 'error', reason: output.stopReason, error: output })
       stream.end()

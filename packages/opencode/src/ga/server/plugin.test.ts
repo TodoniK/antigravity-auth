@@ -369,6 +369,23 @@ describe('loopback bridge', () => {
     expect(await response.text()).toBe('data: {"a":1}\n\ndata: {"b":2}\n\n')
   })
 
+  it('masks project IDs in pre-header bridge errors', async () => {
+    const active = await start(async () => {
+      throw new Error('Project: my-real-project-123456 could not be resolved')
+    })
+    const response = await fetch(
+      active.rewrite(hostRequest(), JOB, NO_PROXY_ENV),
+    )
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({
+      error: {
+        code: 502,
+        message: 'Project: my-r****3456 could not be resolved',
+        status: 'UNAVAILABLE',
+      },
+    })
+  })
+
   it('answers 502 with the original message for a failure before upstream headers', async () => {
     const active = await start(async () => {
       throw new Error('connect ECONNREFUSED fake-endpoint')

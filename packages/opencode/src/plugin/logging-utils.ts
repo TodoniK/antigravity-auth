@@ -1,3 +1,5 @@
+import { maskSensitiveIdentifier } from '@cortexkit/antigravity-auth-core'
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 export interface DebugPolicyInput {
@@ -141,9 +143,7 @@ export function writeConsoleLog(level: LogLevel, ...args: unknown[]): void {
  * class of identifier they are looking at.
  */
 export function redactSensitive(value: string | undefined | null): string {
-  if (typeof value !== 'string' || value.length === 0) return ''
-  if (value.length <= 8) return '****'
-  return `${value.slice(0, 4)}****${value.slice(-4)}`
+  return maskSensitiveIdentifier(value)
 }
 
 /**

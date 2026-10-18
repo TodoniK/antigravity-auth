@@ -2561,6 +2561,54 @@ describe('request.ts', () => {
   })
 
   describe('transformAntigravityResponse', () => {
+    it('masks project IDs in failed request text', async () => {
+      const projectId = 'my-real-project-123456'
+      const response = new Response(
+        JSON.stringify({
+          error: { message: `Upstream rejected project ${projectId}` },
+        }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      )
+      const transformed = await transformAntigravityResponse(
+        response,
+        false,
+        null,
+        'gemini-3-flash',
+        projectId,
+        'https://generativelanguage.googleapis.com',
+        'gemini-3-flash',
+      )
+      const error = (await transformed.json()) as {
+        error: { message: string }
+      }
+
+      expect(error.error.message).not.toContain(projectId)
+      expect(error.error.message).toContain(
+        'Upstream rejected project my-r****3456',
+      )
+      expect(error.error.message).toContain('Project: my-r****3456')
+    })
+
+    it('keeps Unknown when a failed request has no project ID', async () => {
+      const transformed = await transformAntigravityResponse(
+        new Response(
+          JSON.stringify({ error: { message: 'Upstream rejected' } }),
+          {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          },
+        ),
+        false,
+        null,
+        'gemini-3-flash',
+      )
+      const error = (await transformed.json()) as {
+        error: { message: string }
+      }
+
+      expect(error.error.message).toContain('Project: Unknown')
+    })
+
     it('bounds tool-rich HTTP 400 and 429 errors without tool JSON', async () => {
       const logDir = mkdtempSync(join(tmpdir(), 'agy-tool-error-debug-'))
       const schemaMarker = 'private_tool_schema_marker_000'
@@ -2660,9 +2708,7 @@ describe('request.ts', () => {
           expect(errorBody.error.message).toContain('[Debug Info]')
           expect(errorBody.error.message).toContain('Requested Model:')
           expect(errorBody.error.message).toContain('Effective Model:')
-          expect(errorBody.error.message).toContain(
-            'Project: tool-error-project',
-          )
+          expect(errorBody.error.message).toContain('Project: tool****ject')
           expect(errorBody.error.message).toContain('Endpoint:')
           expect(errorBody.error.message).toContain(`Status: ${status}`)
           expect(errorBody.error.message).toContain(

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { maskSensitiveIdentifier } from '@cortexkit/antigravity-auth-core'
 
 import { redactJsonBodyString } from './logging-utils'
 
@@ -124,9 +125,7 @@ function hashText(value: string) {
  * undefined inputs so the caller can drop the field.
  */
 function maskIdentifier(value: string | undefined): string | undefined {
-  if (typeof value !== 'string' || value.length === 0) return undefined
-  if (value.length <= 8) return '****'
-  return `${value.slice(0, 4)}****${value.slice(-4)}`
+  return maskSensitiveIdentifier(value) || undefined
 }
 
 function redactProjectId(value: string | undefined): string | undefined {

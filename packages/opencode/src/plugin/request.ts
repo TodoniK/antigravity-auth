@@ -4,6 +4,8 @@ import {
   getAgyNativeModel,
   isGeminiArgonModel,
   isRetiredAgyModel,
+  maskSensitiveIdentifier,
+  redactProjectIdText,
 } from '@cortexkit/antigravity-auth-core'
 import {
   ANTIGRAVITY_DEFAULT_PROJECT_ID,
@@ -2766,13 +2768,17 @@ async function transformAntigravityResponseIn(
 
       // Inject Debug Info
       if (errorBody?.error) {
-        const rawErrorMessage =
+        const upstreamErrorMessage =
           typeof errorBody.error.message === 'string' &&
           errorBody.error.message.length > 0
             ? errorBody.error.message
             : 'Unknown error'
+        const rawErrorMessage = redactProjectIdText(upstreamErrorMessage, [
+          projectId ?? '',
+        ])
         const errorType = detectErrorType(rawErrorMessage)
-        const debugInfo = `\n\n[Debug Info]\nRequested Model: ${requestedModel || 'Unknown'}\nEffective Model: ${effectiveModel || 'Unknown'}\nProject: ${projectId || 'Unknown'}\nEndpoint: ${endpoint || 'Unknown'}\nStatus: ${response.status}\nRequest ID: ${headers.get('x-request-id') || 'N/A'}${toolDebugMissing !== undefined ? `\nTool Debug Missing: ${toolDebugMissing}` : ''}${toolDebugSummary ? `\nTool Debug Summary: ${toolDebugSummary}` : ''}`
+        const safeProjectId = maskSensitiveIdentifier(projectId) || 'Unknown'
+        const debugInfo = `\n\n[Debug Info]\nRequested Model: ${requestedModel || 'Unknown'}\nEffective Model: ${effectiveModel || 'Unknown'}\nProject: ${safeProjectId}\nEndpoint: ${endpoint || 'Unknown'}\nStatus: ${response.status}\nRequest ID: ${headers.get('x-request-id') || 'N/A'}${toolDebugMissing !== undefined ? `\nTool Debug Missing: ${toolDebugMissing}` : ''}${toolDebugSummary ? `\nTool Debug Summary: ${toolDebugSummary}` : ''}`
         const injectedDebug = debugText ? `\n\n${debugText}` : ''
         errorBody.error.message = rawErrorMessage + debugInfo + injectedDebug
 
